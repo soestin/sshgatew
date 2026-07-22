@@ -21,6 +21,7 @@ type Payload struct {
 	PrivateKey []byte `json:"private_key,omitempty"`
 	PublicKey  []byte `json:"public_key,omitempty"`
 	Passphrase string `json:"passphrase,omitempty"`
+	TOTPSecret string `json:"totp_secret,omitempty"`
 }
 
 func Generate(path string) error {
@@ -74,6 +75,10 @@ func identityAAD(identityID int64) []byte {
 	return []byte(fmt.Sprintf("sshgatew:ssh-identity:v1:%d", identityID))
 }
 
+func totpAAD(userID int64) []byte {
+	return []byte(fmt.Sprintf("sshgatew:user-totp:v1:%d", userID))
+}
+
 func (c *Cipher) Encrypt(targetID int64, kind string, p Payload) ([]byte, []byte, error) {
 	return c.encrypt(p, aad(targetID, kind))
 }
@@ -88,6 +93,21 @@ func (c *Cipher) EncryptSSHIdentity(identityID int64, p Payload) ([]byte, []byte
 
 func (c *Cipher) DecryptSSHIdentity(identityID int64, nonce, ciphertext []byte) (Payload, error) {
 	return c.decrypt(nonce, ciphertext, identityAAD(identityID))
+}
+
+func (c *Cipher) EncryptTOTP(userID int64, secret string) ([]byte, []byte, error) {
+	return c.encrypt(Payload{TOTPSecret: secret}, totpAAD(userID))
+}
+
+func (c *Cipher) DecryptTOTP(userID int64, nonce, ciphertext []byte) (string, error) {
+	payload, err := c.decrypt(nonce, ciphertext, totpAAD(userID))
+	if err != nil {
+		return "", err
+	}
+	if payload.TOTPSecret == "" {
+		return "", errors.New("TOTP payload is empty")
+	}
+	return payload.TOTPSecret, nil
 }
 
 func (c *Cipher) encrypt(p Payload, associatedData []byte) ([]byte, []byte, error) {

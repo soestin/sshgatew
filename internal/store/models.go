@@ -15,7 +15,13 @@ type User struct {
 	ID             int64
 	Username, Role string
 	Enabled        bool
+	TOTPEnabled    bool
 	CreatedAt      time.Time
+}
+type TOTPConfig struct {
+	UserID            int64
+	Nonce, Ciphertext []byte
+	LastCounter       int64
 }
 type GatewayKey struct {
 	ID, UserID                    int64

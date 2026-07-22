@@ -262,7 +262,7 @@ func auditLocal(ctx context.Context, st *store.Store, event string, details map[
 
 func usersCommand(ctx context.Context, st *store.Store, args []string, out, errOut io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("users requires list, add, enable, disable, delete, set-role, or keys")
+		return errors.New("users requires list, add, enable, disable, delete, set-role, keys, or totp")
 	}
 	switch args[0] {
 	case "list":
@@ -275,7 +275,11 @@ func usersCommand(ctx context.Context, st *store.Store, args []string, out, errO
 			if !u.Enabled {
 				state = "disabled"
 			}
-			fmt.Fprintf(out, "%-32s %-8s %s\n", u.Username, u.Role, state)
+			mfa := "totp-off"
+			if u.TOTPEnabled {
+				mfa = "totp-on"
+			}
+			fmt.Fprintf(out, "%-32s %-8s %-8s %s\n", u.Username, u.Role, mfa, state)
 		}
 		return nil
 	case "add":
@@ -323,6 +327,18 @@ func usersCommand(ctx context.Context, st *store.Store, args []string, out, errO
 		return auditLocal(ctx, st, "admin.user.set_role", map[string]any{"username": args[1], "role": args[2]})
 	case "keys":
 		return userKeysCommand(ctx, st, args[1:], out, errOut)
+	case "totp":
+		if len(args) != 3 || args[1] != "remove" {
+			return errors.New("usage: users totp remove USER")
+		}
+		u, e := st.UserByName(ctx, args[2])
+		if e != nil {
+			return e
+		}
+		if e = st.RemoveUserTOTP(ctx, u.ID); e != nil {
+			return e
+		}
+		return auditLocal(ctx, st, "admin.user.totp.remove", map[string]any{"username": u.Username})
 	default:
 		return fmt.Errorf("unknown users operation %q", args[0])
 	}

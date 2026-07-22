@@ -17,6 +17,7 @@ import (
 
 	"sshgatew/internal/secrets"
 	"sshgatew/internal/store"
+	"sshgatew/internal/totp"
 )
 
 func testModel(t *testing.T) (*Model, *store.Store) {
@@ -288,6 +289,61 @@ func TestGenerateReusableSSHKeyAndSelectItForTarget(t *testing.T) {
 	}
 	if target.IdentityID == nil || *target.IdentityID != identity.ID || len(target.Ciphertext) != 0 {
 		t.Fatalf("target did not reference reusable key cleanly: %#v", target)
+	}
+}
+
+func TestTOTPEnrollmentQRAndReplayProtectedChallenge(t *testing.T) {
+	m, st := testModel(t)
+	applyMessage(m, reloadMsg{})
+	m.section = "users"
+	for i, user := range m.users {
+		if user.Username == "admin" {
+			m.cursor = i
+		}
+	}
+	m.openSelectedActions()
+	for i, action := range m.actions {
+		if action.code == "user_totp_setup" {
+			m.actionCursor = i
+		}
+	}
+	m.dispatchAction("user_totp_setup")
+	if m.mode != "totp_enroll" || len(m.pending.totpQR) == 0 {
+		t.Fatal("TOTP QR enrollment did not open")
+	}
+	m.width, m.height = 80, 24
+	if view := m.View().Content; strings.Contains(view, m.pending.totpSecret) || !strings.Contains(view, "TOTP enrollment") || !strings.Contains(view, "Enter continue") {
+		t.Fatal("QR screen leaked the fallback secret or omitted its title/instructions")
+	}
+	secret := m.pending.totpSecret
+	code, _, err := totp.Code(secret, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mode, m.input = "totp_confirm", code
+	applyCommand(m, m.finishTOTPEnrollment())
+	u, err := st.UserByName(context.Background(), "admin")
+	if err != nil || !u.TOTPEnabled {
+		t.Fatalf("user=%#v err=%v", u, err)
+	}
+
+	challenge := NewTOTPChallenge(context.Background(), st, m.cipher, "127.0.0.1", u)
+	challenge.input = code
+	challenge.verifyTOTPChallenge()
+	if challenge.result != nil && challenge.result.Verified {
+		t.Fatal("enrollment code was reusable for authentication")
+	}
+	freshTime := time.Now().Add(30 * time.Second)
+	fresh, _, err := totp.Code(secret, freshTime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Validation accepts the adjacent window, allowing this deterministic test
+	// without waiting for the wall clock to advance.
+	challenge.input = fresh
+	challenge.verifyTOTPChallenge()
+	if challenge.result == nil || !challenge.result.Verified {
+		t.Fatal("fresh TOTP code was rejected")
 	}
 }
 

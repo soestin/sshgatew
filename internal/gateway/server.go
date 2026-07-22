@@ -129,6 +129,20 @@ func (s *Server) handle(sess charmssh.Session) {
 		return
 	}
 	defer s.release(u)
+	if u.TOTPEnabled {
+		pty, windows, _ := sess.Pty()
+		challenge := tui.NewTOTPChallenge(sess.Context(), s.store, s.cipher, sess.RemoteAddr().String(), u)
+		result, err := tui.RunRemote(sess.Context(), sess, pty.Window, windows, challenge)
+		outcome := "success"
+		if err != nil || !result.Verified {
+			outcome = "denied"
+		}
+		_ = s.store.Audit(context.Background(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "gateway.totp", Outcome: outcome})
+		if outcome != "success" {
+			_ = sess.Exit(1)
+			return
+		}
+	}
 	_ = s.store.Audit(sess.Context(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "gateway.session.start", Outcome: "success"})
 	defer s.store.Audit(context.Background(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "gateway.session.end", Outcome: "success"})
 	status := ""

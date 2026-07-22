@@ -1,0 +1,9 @@
+.git
+.gitignore
+sshgatew
+admin.pub
+*.db
+*.db-shm
+*.db-wal
+*.log
+.env

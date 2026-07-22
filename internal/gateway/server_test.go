@@ -21,6 +21,7 @@ import (
 	"sshgatew/internal/config"
 	"sshgatew/internal/secrets"
 	"sshgatew/internal/store"
+	"sshgatew/internal/totp"
 )
 
 func signer(t *testing.T) gossh.Signer {
@@ -154,6 +155,53 @@ func TestPublicKeyLoginAndInteractiveTUI(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "SSHGateW") {
 		t.Fatalf("missing TUI output: %q", output.String())
+	}
+	secret, err := totp.GenerateSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, ciphertext, err := cipher.EncryptTOTP(u.ID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = st.SetUserTOTP(context.Background(), u.ID, nonce, ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	_ = client.Close()
+	client, err = gossh.Dial("tcp", cfg.ListenAddress, clientCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	totpSession, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = totpSession.RequestPty("xterm-256color", 24, 80, gossh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+	totpInput, err := totpSession.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var totpOutput lockedBuffer
+	totpSession.Stdout, totpSession.Stderr = &totpOutput, &totpOutput
+	if err = totpSession.Shell(); err != nil {
+		t.Fatal(err)
+	}
+	code, _, err := totp.Code(secret, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	_, _ = io.WriteString(totpInput, code+"\r")
+	time.Sleep(200 * time.Millisecond)
+	_, _ = io.WriteString(totpInput, "q")
+	if err = totpSession.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if got := totpOutput.String(); !strings.Contains(got, "Two-factor authentication") || !strings.Contains(got, "Connection profiles") {
+		t.Fatalf("TOTP login did not reach the main TUI: %q", got)
 	}
 	badCfg := &gossh.ClientConfig{User: "alice", Auth: []gossh.AuthMethod{gossh.PublicKeys(signer(t))}, HostKeyCallback: gossh.InsecureIgnoreHostKey(), Timeout: time.Second}
 	if bad, err := gossh.Dial("tcp", cfg.ListenAddress, badCfg); err == nil {

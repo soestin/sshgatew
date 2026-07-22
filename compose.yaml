@@ -1,0 +1,42 @@
+services:
+  sshgatew:
+    build:
+      context: .
+      args:
+        VERSION: ${SSHGATEW_VERSION:-dev}
+    image: ghcr.io/soestin/sshgatew:${SSHGATEW_VERSION:-latest}
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${SSHGATEW_PORT:-2222}:2222"
+    environment:
+      SSHGATEW_ADMIN: ${SSHGATEW_ADMIN:-admin}
+      SSHGATEW_LISTEN: 0.0.0.0:2222
+      SSHGATEW_AUTHORIZED_KEY_FILE: /run/secrets/admin_public_key
+    secrets:
+      - admin_public_key
+    volumes:
+      - sshgatew-config:/etc/sshgatew
+      - sshgatew-data:/var/lib/sshgatew
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    stop_grace_period: 20s
+
+volumes:
+  sshgatew-config:
+  sshgatew-data:
+
+secrets:
+  admin_public_key:
+    file: ${SSHGATEW_ADMIN_KEY_FILE:-./admin.pub}

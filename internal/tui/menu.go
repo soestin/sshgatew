@@ -21,11 +21,13 @@ import (
 	"sshgatew/internal/downstream"
 	"sshgatew/internal/secrets"
 	"sshgatew/internal/store"
+	"sshgatew/internal/totp"
 )
 
 type Result struct {
 	TargetID int64
 	Quit     bool
+	Verified bool
 }
 
 type pendingOperation struct {
@@ -39,6 +41,8 @@ type pendingOperation struct {
 	identityID                                int64
 	privateKey                                []byte
 	hostKey                                   gossh.PublicKey
+	totpSecret, totpURI                       string
+	totpQR                                    []string
 }
 
 type formField struct {
@@ -79,10 +83,14 @@ type Model struct {
 	form                  *adminForm
 	actions               []actionItem
 	actionCursor          int
+	totpAttempts          int
 }
 
 func New(ctx context.Context, s *store.Store, cipher *secrets.Cipher, timeout time.Duration, sourceAddress string, u store.User, status string) *Model {
 	return &Model{ctx: ctx, store: s, cipher: cipher, timeout: timeout, sourceAddress: sourceAddress, user: u, status: status, section: "targets"}
+}
+func NewTOTPChallenge(ctx context.Context, s *store.Store, cipher *secrets.Cipher, sourceAddress string, u store.User) *Model {
+	return &Model{ctx: ctx, store: s, cipher: cipher, sourceAddress: sourceAddress, user: u, section: "targets", mode: "totp_auth", status: "Enter the current code from your authenticator app."}
 }
 func (m *Model) Result() Result {
 	if m.result == nil {
@@ -313,6 +321,25 @@ func (m *Model) handleModeKey(key string) tea.Cmd {
 		return nil
 	}
 	switch m.mode {
+	case "totp_auth":
+		if key == "enter" {
+			m.verifyTOTPChallenge()
+			return nil
+		}
+		if key == "esc" || key == "ctrl+c" {
+			m.result = &Result{Quit: true}
+			return tea.Quit
+		}
+	case "totp_enroll":
+		if key == "enter" {
+			m.mode, m.input = "totp_confirm", ""
+			m.status = "Enter a current code to verify enrollment."
+			return nil
+		}
+	case "totp_confirm":
+		if key == "enter" {
+			return m.finishTOTPEnrollment()
+		}
 	case "form":
 		return m.handleFormKey(key)
 	case "actions", "key_remove", "member_add", "member_remove":
@@ -502,7 +529,11 @@ func (m *Model) openSelectedActions() tea.Cmd {
 		if !u.Enabled {
 			state = "Enable"
 		}
-		m.actions = []actionItem{{"Add SSH key", "user_key_add"}, {"Remove SSH key", "user_key_remove"}, {role, "user_role"}, {state, "user_toggle"}, {"Delete", "user_delete"}}
+		totpAction := actionItem{"Set up TOTP", "user_totp_setup"}
+		if u.TOTPEnabled {
+			totpAction = actionItem{"Remove TOTP", "user_totp_remove"}
+		}
+		m.actions = []actionItem{{"Add SSH key", "user_key_add"}, {"Remove SSH key", "user_key_remove"}, totpAction, {role, "user_role"}, {state, "user_toggle"}, {"Delete", "user_delete"}}
 	case "keys":
 		if len(m.identities) == 0 {
 			m.status = "No SSH key selected."
@@ -582,7 +613,7 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 	case "target_toggle":
 		enabled := !p.target.Enabled
 		return m.mutate("targets", "Target updated.", "admin.target."+enabledWord(enabled), map[string]any{"target": p.target.Name}, func() error { return m.store.SetTargetEnabled(m.ctx, p.target.Name, enabled) })
-	case "target_delete", "user_delete", "group_delete", "grant_delete", "identity_delete":
+	case "target_delete", "user_delete", "group_delete", "grant_delete", "identity_delete", "user_totp_remove":
 		p.kind = code
 		m.mode = "confirm_delete"
 	case "identity_view":
@@ -590,6 +621,21 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 	case "user_key_add":
 		m.mode, m.input = "public_key", ""
 		m.status = "Paste an OpenSSH public key, then press Enter."
+	case "user_totp_setup":
+		secret, err := totp.GenerateSecret()
+		if err != nil {
+			m.closeModal("TOTP setup failed: " + err.Error())
+			return nil
+		}
+		uri := totp.URI("SSHGateW", p.username, secret)
+		qr, err := totp.QR(uri)
+		if err != nil {
+			m.closeModal("TOTP QR generation failed: " + err.Error())
+			return nil
+		}
+		p.kind, p.totpSecret, p.totpURI, p.totpQR = "user_totp_setup", secret, uri, qr
+		m.mode = "totp_enroll"
+		m.status = "Scan the QR code, then press Enter."
 	case "user_key_remove":
 		keys, err := m.store.ListGatewayKeys(m.ctx, p.username)
 		if err != nil || len(keys) == 0 {
@@ -888,10 +934,58 @@ func (m *Model) finishDelete() tea.Cmd {
 	case "grant_delete":
 		g := p.grant
 		return m.mutate("grants", "Access removed.", "admin.grant.remove", map[string]any{"target": g.Target, "kind": g.Kind, "principal": g.Principal}, func() error { return m.store.SetGrant(m.ctx, g.Target, g.Kind, g.Principal, false) })
+	case "user_totp_remove":
+		return m.mutate("users", "TOTP removed.", "admin.user.totp.remove", map[string]any{"username": p.username}, func() error { return m.store.RemoveUserTOTP(m.ctx, p.user.ID) })
 	case "identity_delete":
 		return m.mutate("keys", "SSH key deleted.", "admin.ssh_identity.delete", map[string]any{"ssh_key": p.identity.Name, "fingerprint": p.identity.Fingerprint}, func() error { return m.store.DeleteSSHIdentity(m.ctx, p.identity.Name) })
 	}
 	return nil
+}
+
+func (m *Model) finishTOTPEnrollment() tea.Cmd {
+	p := m.pending
+	counter, valid := totp.Validate(p.totpSecret, m.input, time.Now())
+	if !valid {
+		m.status, m.input = "Invalid TOTP code. Try a fresh code.", ""
+		return nil
+	}
+	return m.mutate("users", "TOTP enabled.", "admin.user.totp.enable", map[string]any{"username": p.username}, func() error {
+		nonce, ciphertext, err := m.cipher.EncryptTOTP(p.user.ID, p.totpSecret)
+		if err == nil {
+			err = m.store.SetUserTOTP(m.ctx, p.user.ID, nonce, ciphertext)
+		}
+		if err == nil {
+			err = m.store.ConsumeTOTPCounter(m.ctx, p.user.ID, counter)
+		}
+		return err
+	})
+}
+
+func (m *Model) verifyTOTPChallenge() {
+	config, err := m.store.UserTOTP(m.ctx, m.user.ID)
+	if err == nil {
+		var secret string
+		secret, err = m.cipher.DecryptTOTP(m.user.ID, config.Nonce, config.Ciphertext)
+		if err == nil {
+			counter, valid := totp.Validate(secret, m.input, time.Now())
+			if !valid {
+				err = errors.New("invalid verification code")
+			} else {
+				err = m.store.ConsumeTOTPCounter(m.ctx, m.user.ID, counter)
+			}
+		}
+	}
+	m.input = ""
+	if err != nil {
+		m.totpAttempts++
+		if m.totpAttempts >= 5 {
+			m.result = &Result{Quit: true}
+			return
+		}
+		m.status = "Verification failed. Enter a fresh code."
+		return
+	}
+	m.result = &Result{Verified: true}
 }
 
 func (m *Model) mutate(section, status, event string, details map[string]any, fn func() error) tea.Cmd {
@@ -1415,6 +1509,9 @@ func (m *Model) View() tea.View {
 	if w < 20 || h < 8 {
 		return m.compactView(w, h)
 	}
+	if m.mode == "totp_enroll" {
+		return m.totpEnrollmentView(w, h)
+	}
 	inner := w - 4
 	lines := make([]string, 0, h)
 	role := strings.ToUpper(m.user.Role)
@@ -1458,6 +1555,28 @@ func (m *Model) View() tea.View {
 	v := tea.NewView(strings.Join(lines, "\n"))
 	v.AltScreen = true
 	v.WindowTitle = "SSHGateW"
+	return v
+}
+
+func (m *Model) totpEnrollmentView(w, h int) tea.View {
+	lines := []string{fit(brightCyan+" SSHGateW • TOTP enrollment "+reset, w)}
+	if m.pending != nil {
+		for _, qrLine := range m.pending.totpQR {
+			padding := maxInt((w-ansi.StringWidth(qrLine))/2, 0)
+			coloredQR := "\x1b[47;30m" + qrLine + reset
+			lines = append(lines, fit(strings.Repeat(" ", padding)+coloredQR, w))
+		}
+	}
+	for len(lines) < h-1 {
+		lines = append(lines, strings.Repeat(" ", w))
+	}
+	lines = append(lines, fit(dim+"  Scan QR  •  Enter continue  •  Esc cancel"+reset, w))
+	if len(lines) > h {
+		lines = lines[:h]
+	}
+	v := tea.NewView(strings.Join(lines, "\n"))
+	v.AltScreen = true
+	v.WindowTitle = "SSHGateW TOTP enrollment"
 	return v
 }
 
@@ -1523,7 +1642,11 @@ func (m *Model) content(inner int) (string, string, []string) {
 			if !u.Enabled {
 				state = "DISABLED"
 			}
-			rows = append(rows, fmt.Sprintf("  %-24s  %-8s  %s", u.Username, strings.ToUpper(u.Role), state))
+			mfa := "TOTP OFF"
+			if u.TOTPEnabled {
+				mfa = "TOTP ON"
+			}
+			rows = append(rows, fmt.Sprintf("  %-20s  %-8s  %-8s  %s", u.Username, strings.ToUpper(u.Role), mfa, state))
 		}
 		return "Users", dim + "  Gateway identities and roles" + reset, rows
 	case "groups":
@@ -1626,6 +1749,8 @@ func (m *Model) modalContent(inner int) (string, string, []string) {
 				name = "grant for " + m.pending.grant.Target
 			case "identity_delete":
 				name = "SSH key " + m.pending.identity.Name
+			case "user_totp_remove":
+				name = "TOTP for user " + m.pending.username
 			}
 		}
 		return "Confirm removal", red + "  This change takes effect immediately" + reset, []string{"", "  Remove " + name + "?", "", red + "  y  Remove" + reset, dim + "  n  Keep it" + reset}
@@ -1656,6 +1781,17 @@ func (m *Model) modalContent(inner int) (string, string, []string) {
 		return "Secure private-key input", "  Paste the key, then press Ctrl+D", []string{"", fmt.Sprintf("  Private key captured: %d bytes", len(m.input)), "", green + "  Ctrl+D  Validate and save" + reset, dim + "  Esc     Cancel" + reset}
 	case "secret_passphrase":
 		return "Private-key passphrase", "  Contents are never rendered or logged", []string{"", fmt.Sprintf("  %s  %d bytes captured", strings.Repeat("•", minInt(len(m.input), 24)), len(m.input)), "", green + "  Enter  Unlock and save" + reset, dim + "  Esc    Cancel" + reset}
+	case "totp_confirm":
+		secret, uri := "", ""
+		if m.pending != nil {
+			secret, uri = m.pending.totpSecret, m.pending.totpURI
+		}
+		rows := []string{"  Manual secret  " + secret, "", "  Setup URI:"}
+		rows = append(rows, wrapText("  "+uri, maxInt(inner-2, 16))...)
+		rows = append(rows, "", fmt.Sprintf("  %s  %d digits captured", strings.Repeat("•", minInt(len(m.input), 6)), len(m.input)), "", green+"  Enter  Verify and enable"+reset)
+		return "Confirm TOTP enrollment", "  Enter the current six-digit authenticator code", rows
+	case "totp_auth":
+		return "Two-factor authentication", "  Public key accepted • TOTP required", []string{"", fmt.Sprintf("  %s  %d digits captured", strings.Repeat("•", minInt(len(m.input), 6)), len(m.input)), "", green + "  Enter  Verify" + reset, dim + "  Esc    Disconnect" + reset}
 	default:
 		return "Working", "  Please wait…", nil
 	}

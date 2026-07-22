@@ -76,8 +76,9 @@ CREATE TABLE IF NOT EXISTS users(
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS gateway_keys(
  id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
- fingerprint TEXT NOT NULL UNIQUE, public_key TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+ fingerprint TEXT NOT NULL, public_key TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(user_id,fingerprint));
 CREATE TABLE IF NOT EXISTS groups_table(
  id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE BINARY,
  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
@@ -124,9 +125,64 @@ INSERT OR IGNORE INTO schema_migrations(version) VALUES(1);`
 		return err
 	}
 	if migrated == 0 {
-		return s.migrateIdentitiesV3()
+		if err := s.migrateIdentitiesV3(); err != nil {
+			return err
+		}
+	}
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version=4").Scan(&migrated); err != nil {
+		return err
+	}
+	if migrated == 0 {
+		if err := s.migrateTOTPV4(); err != nil {
+			return err
+		}
+	}
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version=5").Scan(&migrated); err != nil {
+		return err
+	}
+	if migrated == 0 {
+		return s.migrateGatewayKeyUniquenessV5()
 	}
 	return nil
+}
+
+func (s *Store) migrateGatewayKeyUniquenessV5() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`CREATE TABLE gateway_keys_v5(
+ id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ fingerprint TEXT NOT NULL, public_key TEXT NOT NULL, label TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(user_id,fingerprint));
+INSERT INTO gateway_keys_v5 SELECT id,user_id,fingerprint,public_key,label,created_at FROM gateway_keys;
+DROP TABLE gateway_keys;
+ALTER TABLE gateway_keys_v5 RENAME TO gateway_keys;
+INSERT INTO schema_migrations(version) VALUES(5);`); err != nil {
+		return fmt.Errorf("migrate gateway key uniqueness: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *Store) migrateTOTPV4() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`CREATE TABLE IF NOT EXISTS user_totp(
+ user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ secret_nonce BLOB NOT NULL, secret_ciphertext BLOB NOT NULL,
+ last_counter INTEGER NOT NULL DEFAULT -1,
+	 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+		return fmt.Errorf("migrate user TOTP: %w", err)
+	}
+	if _, err = tx.Exec("INSERT INTO schema_migrations(version) VALUES(4)"); err != nil {
+		return fmt.Errorf("record user TOTP migration: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) migrateTargetsV2() error {
@@ -252,20 +308,20 @@ func (s *Store) AddUser(ctx context.Context, username, role string) (User, error
 	return s.UserByID(ctx, id)
 }
 func (s *Store) UserByID(ctx context.Context, id int64) (User, error) {
-	return scanUser(s.db.QueryRowContext(ctx, "SELECT id,username,role,enabled,created_at FROM users WHERE id=?", id))
+	return scanUser(s.db.QueryRowContext(ctx, "SELECT id,username,role,enabled,created_at,EXISTS(SELECT 1 FROM user_totp WHERE user_id=users.id) FROM users WHERE id=?", id))
 }
 func (s *Store) UserByName(ctx context.Context, name string) (User, error) {
-	return scanUser(s.db.QueryRowContext(ctx, "SELECT id,username,role,enabled,created_at FROM users WHERE username=?", strings.ToLower(name)))
+	return scanUser(s.db.QueryRowContext(ctx, "SELECT id,username,role,enabled,created_at,EXISTS(SELECT 1 FROM user_totp WHERE user_id=users.id) FROM users WHERE username=?", strings.ToLower(name)))
 }
 func scanUser(row *sql.Row) (User, error) {
 	var u User
 	var at string
-	err := row.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &at)
+	err := row.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &at, &u.TOTPEnabled)
 	u.CreatedAt = parseTime(at)
 	return u, err
 }
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT id,username,role,enabled,created_at FROM users ORDER BY username")
+	rows, err := s.db.QueryContext(ctx, "SELECT id,username,role,enabled,created_at,EXISTS(SELECT 1 FROM user_totp WHERE user_id=users.id) FROM users ORDER BY username")
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +330,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	for rows.Next() {
 		var u User
 		var at string
-		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &at); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &at, &u.TOTPEnabled); err != nil {
 			return nil, err
 		}
 		u.CreatedAt = parseTime(at)
@@ -342,6 +398,13 @@ func (s *Store) AddGatewayKey(ctx context.Context, username, fingerprint, public
 	if err != nil {
 		return err
 	}
+	var exists bool
+	if err = s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM gateway_keys WHERE user_id=? AND fingerprint=?)", u.ID, fingerprint).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return errors.New("that SSH key is already assigned to this user")
+	}
 	_, err = s.db.ExecContext(ctx, "INSERT INTO gateway_keys(user_id,fingerprint,public_key,label) VALUES(?,?,?,?)", u.ID, fingerprint, publicKey, label)
 	return err
 }
@@ -387,9 +450,44 @@ func (s *Store) RemoveGatewayKey(ctx context.Context, username, fingerprint stri
 func (s *Store) AuthenticateKey(ctx context.Context, username, fingerprint string) (User, error) {
 	var u User
 	var at string
-	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.username,u.role,u.enabled,u.created_at FROM users u JOIN gateway_keys k ON k.user_id=u.id WHERE u.username=? AND u.enabled=1 AND k.fingerprint=?`, strings.ToLower(username), fingerprint).Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &at)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id,u.username,u.role,u.enabled,u.created_at,EXISTS(SELECT 1 FROM user_totp WHERE user_id=u.id) FROM users u JOIN gateway_keys k ON k.user_id=u.id WHERE u.username=? AND u.enabled=1 AND k.fingerprint=?`, strings.ToLower(username), fingerprint).Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &at, &u.TOTPEnabled)
 	u.CreatedAt = parseTime(at)
 	return u, err
+}
+
+func (s *Store) SetUserTOTP(ctx context.Context, userID int64, nonce, ciphertext []byte) error {
+	if len(nonce) == 0 || len(ciphertext) == 0 {
+		return errors.New("encrypted TOTP secret is required")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO user_totp(user_id,secret_nonce,secret_ciphertext,last_counter) VALUES(?,?,?,-1)
+ ON CONFLICT(user_id) DO UPDATE SET secret_nonce=excluded.secret_nonce,secret_ciphertext=excluded.secret_ciphertext,last_counter=-1,created_at=CURRENT_TIMESTAMP`, userID, nonce, ciphertext)
+	return err
+}
+
+func (s *Store) UserTOTP(ctx context.Context, userID int64) (TOTPConfig, error) {
+	var config TOTPConfig
+	err := s.db.QueryRowContext(ctx, "SELECT user_id,secret_nonce,secret_ciphertext,last_counter FROM user_totp WHERE user_id=?", userID).Scan(&config.UserID, &config.Nonce, &config.Ciphertext, &config.LastCounter)
+	return config, err
+}
+
+func (s *Store) RemoveUserTOTP(ctx context.Context, userID int64) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM user_totp WHERE user_id=?", userID)
+	return changed(result, err)
+}
+
+func (s *Store) ConsumeTOTPCounter(ctx context.Context, userID, counter int64) error {
+	result, err := s.db.ExecContext(ctx, "UPDATE user_totp SET last_counter=? WHERE user_id=? AND last_counter<?", counter, userID, counter)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows != 1 {
+		return errors.New("TOTP code was already used")
+	}
+	return nil
 }
 
 func (s *Store) AddGroup(ctx context.Context, name string) error {

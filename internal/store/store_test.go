@@ -59,8 +59,35 @@ INSERT INTO targets(name,host,port,remote_username,credential_kind,host_key_algo
 		t.Fatalf("forwarded-agent target rejected after migration: %v", err)
 	}
 	var version int
-	if err = store.DB().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 3 {
+	if err = store.DB().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 5 {
 		t.Fatalf("migration version=%d err=%v", version, err)
+	}
+}
+func TestTOTPStorageAndReplayProtection(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	u, err := s.AddUser(ctx, "alice", RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetUserTOTP(ctx, u.ID, []byte("nonce"), []byte("ciphertext")); err != nil {
+		t.Fatal(err)
+	}
+	u, err = s.UserByID(ctx, u.ID)
+	if err != nil || !u.TOTPEnabled {
+		t.Fatalf("user=%#v err=%v", u, err)
+	}
+	if err = s.ConsumeTOTPCounter(ctx, u.ID, 42); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.ConsumeTOTPCounter(ctx, u.ID, 42); err == nil {
+		t.Fatal("replayed TOTP counter was accepted")
+	}
+	if err = s.ConsumeTOTPCounter(ctx, u.ID, 41); err == nil {
+		t.Fatal("older TOTP counter was accepted")
+	}
+	if err = s.RemoveUserTOTP(ctx, u.ID); err != nil {
+		t.Fatal(err)
 	}
 }
 func TestReusableSSHIdentityTargetAndDeletionSafety(t *testing.T) {
@@ -148,7 +175,7 @@ func TestForeignKeysAndAudit(t *testing.T) {
 		t.Fatalf("audit FK behavior: %#v", events)
 	}
 }
-func TestDuplicateGatewayKey(t *testing.T) {
+func TestGatewayKeyCanBeSharedAcrossUsersButNotDuplicatedPerUser(t *testing.T) {
 	ctx := context.Background()
 	s := testStore(t)
 	_, _ = s.AddUser(ctx, "alice", RoleMember)
@@ -156,7 +183,10 @@ func TestDuplicateGatewayKey(t *testing.T) {
 	if err := s.AddGatewayKey(ctx, "alice", "SHA256:same", "key", "a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddGatewayKey(ctx, "bob", "SHA256:same", "key", "b"); err == nil {
-		t.Fatal("duplicate fingerprint accepted")
+	if err := s.AddGatewayKey(ctx, "bob", "SHA256:same", "key", "b"); err != nil {
+		t.Fatalf("shared key rejected for another username: %v", err)
+	}
+	if err := s.AddGatewayKey(ctx, "alice", "SHA256:same", "key", "duplicate"); err == nil {
+		t.Fatal("duplicate key accepted for the same user")
 	}
 }

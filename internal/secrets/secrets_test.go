@@ -56,6 +56,28 @@ func TestSSHIdentityCipherRoundTripAndNamespaceBinding(t *testing.T) {
 	}
 }
 
+func TestTOTPCipherRoundTripAndBinding(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "key")
+	if err := Generate(p); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, ciphertext, err := c.EncryptTOTP(7, "JBSWY3DPEHPK3PXP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := c.DecryptTOTP(7, nonce, ciphertext)
+	if err != nil || secret != "JBSWY3DPEHPK3PXP" {
+		t.Fatalf("secret=%q err=%v", secret, err)
+	}
+	if _, err = c.DecryptTOTP(8, nonce, ciphertext); err == nil {
+		t.Fatal("user binding not enforced")
+	}
+}
+
 const CredentialKindForTest = "private_key"
 
 func TestPermissions(t *testing.T) {

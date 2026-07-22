@@ -1,5 +1,34 @@
 # Operator guide
 
+## Docker Compose
+
+The repository includes `compose.yaml` and a multi-stage `Dockerfile`. Copy an
+administrator public key to `admin.pub` and start the gateway:
+
+```sh
+SSHGATEW_ADMIN=admin SSHGATEW_VERSION=0.7.1 docker compose up -d --build
+docker compose logs sshgatew
+```
+
+The first container startup initializes SSHGateW automatically. Preserve both
+named volumes: `sshgatew-config` contains the configuration, while
+`sshgatew-data` contains the database, master key, and gateway host key. Back
+up both volumes together. Rebuilding or replacing the container does not rerun
+initialization while the configuration exists.
+
+Useful overrides can be placed in an uncommitted `.env` file:
+
+```dotenv
+SSHGATEW_ADMIN=admin
+SSHGATEW_ADMIN_KEY_FILE=./admin.pub
+SSHGATEW_PORT=2222
+SSHGATEW_VERSION=0.7.1
+```
+
+Use `docker compose down` to stop the service. Do not add `--volumes` unless
+you intend to destroy the installation; deleting either named volume can make
+the encrypted credentials unavailable or inconsistent.
+
 ## Single-binary bootstrap
 
 On a fresh systemd Linux host:
@@ -33,10 +62,13 @@ users set-role USER member|admin
 users keys list USER
 users keys add USER --file PUBLIC_KEY [--label LABEL]
 users keys remove USER SHA256:FINGERPRINT
+users totp remove USER
 ```
 
 SSHGateW prevents removal of the final enabled administrator with a usable
-gateway key. One public key cannot be assigned to multiple users.
+gateway key. A public key may be assigned to multiple users because login
+matching includes both the claimed SSH username and key fingerprint. Assigning
+the same key twice to one user is rejected.
 
 ## Groups and grants
 
@@ -116,6 +148,22 @@ copied into a downstream `authorized_keys` file. Imported encrypted OpenSSH
 keys are supported and their passphrase remains inside the encrypted payload.
 When adding a target or replacing its credential, choose `stored_key` and then
 select the saved key by name. Keys referenced by targets cannot be deleted.
+
+To enable two-factor authentication, open `USERS`, manage a user, and choose
+`Set up TOTP`. Scan the terminal QR code with an authenticator app, press Enter,
+then provide the current six-digit code. Enrollment is committed only after
+that code succeeds. The user must subsequently enter a TOTP code after SSH-key
+authentication and before the gateway menu opens. Each counter value can be
+used only once, one adjacent 30-second window is accepted for clock drift, and
+the connection closes after five failures.
+
+If an authenticator is lost, another administrator can remove TOTP through the
+user's Manage menu. Host administrators can recover locally without entering
+the gateway using:
+
+```sh
+sudo -u sshgatew sshgatew --config /etc/sshgatew/config.toml users totp remove USER
+```
 
 Target addition and host-key replacement scan the server, display the observed
 fingerprint, and require `y` confirmation. Passwords and private keys use a

@@ -8,6 +8,9 @@ downstream credential it manages. Harden and monitor the host accordingly.
 
 - Gateway users authenticate with an exact registered public-key fingerprint
   under the SSH username they claim.
+- Users with TOTP enabled must also pass an application-level RFC 6238 challenge
+  before target metadata or the gateway menu becomes available. A code counter
+  cannot be reused and five failures close the connection.
 - Authorization is checked when listing targets and again immediately before a
   downstream connection.
 - Downstream host public keys are pinned exactly. Unknown and changed keys fail
@@ -19,6 +22,9 @@ downstream credential it manages. Harden and monitor the host accordingly.
   no group/world permission bits. The SQLite database is mode 0600.
 - Passwords, private keys, passphrases, terminal contents, and downstream
   commands are excluded from logs and audit records.
+- TOTP seeds are encrypted under the master key with associated data binding
+  each seed to its user ID. Seeds and submitted codes are never logged or
+  included in audit metadata.
 - Forwarded-agent targets pin one exact public key. The agent is used only for
   the downstream authentication handshake and its channel is then closed.
 

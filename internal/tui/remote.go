@@ -27,7 +27,9 @@ type inputEvent struct{ key, paste string }
 // time, ensuring no background reader survives to steal downstream keystrokes.
 func RunRemote(ctx context.Context, rw io.ReadWriter, initial charmssh.Window, windows <-chan charmssh.Window, m *Model) (Result, error) {
 	m.width, m.height = initial.Width, initial.Height
-	applyMessage(m, reloadMsg{})
+	if m.mode != "totp_auth" {
+		applyMessage(m, reloadMsg{})
+	}
 	if _, err := io.WriteString(rw, enterScreen); err != nil {
 		return Result{}, err
 	}

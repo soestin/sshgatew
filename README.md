@@ -1,5 +1,10 @@
 # SSHGateW
 
+[![CI](https://github.com/soestin/sshgatew/actions/workflows/ci.yml/badge.svg)](https://github.com/soestin/sshgatew/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/soestin/sshgatew/actions/workflows/codeql.yml/badge.svg)](https://github.com/soestin/sshgatew/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/soestin/sshgatew)](https://github.com/soestin/sshgatew/releases)
+[![Container](https://img.shields.io/badge/ghcr.io-soestin%2Fsshgatew-blue)](https://github.com/soestin/sshgatew/pkgs/container/sshgatew)
+
 SSHGateW is a self-hosted SSH credential gateway. Team members authenticate to
 the gateway with their own SSH public keys, choose an authorized connection
 profile in a terminal UI, and receive a transparent interactive shell on the
@@ -9,6 +14,7 @@ encrypted at rest.
 ## Current features
 
 - Public-key authentication to the gateway on port 2222 by default.
+- Optional per-user TOTP second-factor authentication with terminal QR enrollment.
 - Member and administrator terminal interfaces.
 - Per-user and per-group target grants.
 - Password, reusable stored-key, per-target private-key, and restricted forwarded-agent authentication.
@@ -23,6 +29,40 @@ Go 1.26 or newer is required.
 
 ```sh
 make build VERSION=0.1.0
+```
+
+## Run with Docker Compose
+
+Place the initial administrator's OpenSSH public key in `admin.pub`, then run:
+
+```sh
+SSHGATEW_ADMIN=admin SSHGATEW_VERSION=latest docker compose up -d
+docker compose logs sshgatew
+```
+
+The first startup creates the database, encryption master key, gateway host
+key, configuration, and administrator automatically. The logs print the new
+gateway host-key fingerprint; verify it before connecting:
+
+```sh
+ssh -p 2222 admin@docker-host.example.com
+```
+
+Set `SSHGATEW_PORT` to publish a different host port and
+`SSHGATEW_ADMIN_KEY_FILE` if the bootstrap public key is not `./admin.pub`.
+Configuration and encrypted data live in the `sshgatew-config` and
+`sshgatew-data` named volumes and survive container replacement. The bootstrap
+key file is used only when the configuration volume is empty. The service
+process runs as the unprivileged `sshgatew` user; the entrypoint uses its narrow
+startup capabilities only to repair named-volume ownership before dropping
+privileges.
+
+To build the image locally, add `--build`. To upgrade from GHCR without
+reinitializing:
+
+```sh
+SSHGATEW_VERSION=NEW_VERSION docker compose pull
+docker compose up -d
 ```
 
 ## Install from one binary
@@ -101,6 +141,11 @@ Connect with:
 ```sh
 ssh -p 2222 admin@gateway.example.com
 ```
+
+Users with TOTP enabled are shown a hidden six-digit challenge after their SSH
+key is accepted and before the gateway menu opens. Administrators can enroll or
+remove TOTP through a user's Manage menu. Enrollment displays a scannable QR
+code and requires a current authenticator code before it takes effect.
 
 Verify the gateway host-key fingerprint printed by `sshgatew init` before
 accepting it in the SSH client.
