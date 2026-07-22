@@ -98,6 +98,21 @@ func TestViewStaysInsideTerminal(t *testing.T) {
 	}
 }
 
+func TestEmptyForwardsViewExplainsHowToAllowDestination(t *testing.T) {
+	m, _ := testModel(t)
+	m.section, m.forwardRules = "forwards", nil
+	for _, width := range []int{40, 80} {
+		m.width, m.height = width, 24
+		view := ansi.Strip(m.View().Content)
+		if !strings.Contains(view, "Press a to allow a destination") {
+			t.Fatalf("%d-column empty state omitted add instruction: %q", width, view)
+		}
+		if !strings.Contains(view, "a allow destination") {
+			t.Fatalf("%d-column footer omitted add shortcut: %q", width, view)
+		}
+	}
+}
+
 func TestSearchIsExplicitAndPageNavigationClamps(t *testing.T) {
 	m, _ := testModel(t)
 	m.targets = []store.Target{{Name: "alpha"}, {Name: "beta"}}
