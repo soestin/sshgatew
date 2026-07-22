@@ -1,0 +1,30 @@
+[Unit]
+Description=SSHGateW SSH credential gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sshgatew
+Group=sshgatew
+ExecStart=/usr/local/bin/sshgatew --config /etc/sshgatew/config.toml serve
+Restart=on-failure
+RestartSec=3s
+TimeoutStopSec=15s
+LimitNOFILE=8192
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sshgatew
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

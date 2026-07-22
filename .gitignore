@@ -1,0 +1,6 @@
+/sshgatew
+*.db
+*.db-shm
+*.db-wal
+*.test
+coverage.out

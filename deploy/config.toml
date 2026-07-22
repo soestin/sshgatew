@@ -1,0 +1,10 @@
+listen_address = "0.0.0.0:2222"
+database_path = "/var/lib/sshgatew/sshgatew.db"
+master_key_path = "/var/lib/sshgatew/master.key"
+host_key_path = "/var/lib/sshgatew/ssh_host_ed25519_key"
+idle_timeout = "30m0s"
+downstream_dial_timeout = "10s"
+max_sessions = 100
+max_sessions_per_user = 5
+log_level = "info"
+log_format = "json"

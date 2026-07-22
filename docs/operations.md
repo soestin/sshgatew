@@ -1,0 +1,120 @@
+# Operator guide
+
+All commands accept `--config PATH` before the subcommand. The default is
+`/etc/sshgatew/config.toml`.
+
+## Users and keys
+
+```text
+users list
+users add USER [--role member|admin]
+users enable|disable|delete USER
+users set-role USER member|admin
+users keys list USER
+users keys add USER --file PUBLIC_KEY [--label LABEL]
+users keys remove USER SHA256:FINGERPRINT
+```
+
+SSHGateW prevents removal of the final enabled administrator with a usable
+gateway key. One public key cannot be assigned to multiple users.
+
+## Groups and grants
+
+```text
+groups list
+groups add|delete GROUP
+groups members add|remove GROUP USER
+grants list
+grants add|remove --target TARGET --user USER
+grants add|remove --target TARGET --group GROUP
+```
+
+Administrators can access every enabled target. Members receive the union of
+their direct and group grants.
+
+## Targets
+
+```text
+targets list
+targets add --name NAME --host HOST [--port 22] --remote-user USER \
+  --auth password|private_key|forwarded_agent [--key-file FILE] \
+  [--host-key-file FILE | --accept-host-key]
+targets edit NAME [--host HOST] [--port PORT] [--remote-user USER]
+targets enable|disable|delete NAME
+targets credential replace NAME [--auth password|private_key|forwarded_agent] [--key-file FILE]
+targets host-key scan NAME
+targets host-key replace NAME [--host-key-file FILE | --accept-host-key]
+```
+
+`host-key scan` never mutates the pin. A network scan is not identity proof;
+compare its SHA-256 fingerprint out-of-band. Host-key changes always require an
+explicit replacement operation and produce an audit event.
+
+Secrets are accepted through a hidden terminal prompt or standard input. Avoid
+piping secrets on multi-user systems unless the producing process is equally
+protected.
+
+### Forwarded-agent and security-key targets
+
+Choose `forwarded_agent` and paste the public key that is authorized on the
+downstream server. SSHGateW stores no private key for this mode and restricts
+authentication to that exact public key, even if the forwarded agent contains
+other identities. Connect with agent forwarding enabled:
+
+```sh
+ssh-add ~/.ssh/id_ed25519_sk
+ssh -A -p 2222 admin@gateway.example.com
+```
+
+The authenticator may request a touch when the target connection starts. The
+agent channel is closed immediately after authentication and is never exposed
+inside the downstream shell. Without `-A`, SSHGateW returns to the target menu
+with an actionable error.
+
+## Remote administrator TUI
+
+Administrators can browse targets, users, groups, grants, and recent audit
+events. The interface adapts to the SSH terminal size and paginates long lists.
+Resize events redraw it in place without disconnecting the session.
+
+Use Up/Down or `j`/`k` to select, PgUp/PgDn to change pages, Home/End to jump,
+Enter to connect, `/` to search, `1`–`5` or Left/Right to change administrator
+sections, `?` for help, and `q` to leave. Administrators perform changes through
+contextual menus—no command syntax is required. Press `a` to add an item in the
+current section. Press Enter or `m` to manage the selected user, group, grant,
+or target. Tab moves through form fields and Left/Right changes a choice.
+
+The menus cover target connection settings, credentials, pinned host keys,
+enabled state and deletion; user roles, enabled state and SSH keys; group
+membership; and user/group target grants. Destructive actions require an
+explicit confirmation.
+
+Target addition and host-key replacement scan the server, display the observed
+fingerprint, and require `y` confirmation. Passwords and private keys use a
+separate hidden input mode. Paste a private key and press Ctrl+D; encrypted keys
+then request a hidden passphrase.
+
+## Auditing
+
+```text
+audit list [--limit 100]
+audit prune --before 2026-01-01T00:00:00Z
+```
+
+Audit retention is indefinite until explicitly pruned. Events contain identity,
+source address, target, outcome, and safe metadata. They never contain terminal
+input/output or credentials.
+
+## Backup and recovery
+
+Back up these files separately and securely:
+
+- `/var/lib/sshgatew/sshgatew.db`
+- `/var/lib/sshgatew/master.key`
+- `/var/lib/sshgatew/ssh_host_ed25519_key`
+- `/etc/sshgatew/config.toml`
+
+The database is unusable for downstream authentication without the exact master
+key. Losing the gateway host key causes SSH clients to report a changed gateway
+identity. Stop the daemon or use SQLite's online backup mechanism before copying
+the live database.
