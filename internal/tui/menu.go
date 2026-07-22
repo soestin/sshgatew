@@ -1584,7 +1584,11 @@ func (m *Model) View() tea.View {
 	}
 	lines = append(lines, borderTop(label, w))
 	if len(rows) == 0 {
-		rows = []string{dim + "Nothing to show here yet." + reset}
+		message := "Nothing to show here yet."
+		if m.section == "forwards" && m.mode == "" {
+			message = "Press a to allow a destination."
+		}
+		rows = []string{dim + message + reset}
 		start, end = 0, 1
 	}
 	for i := start; i < end; i++ {
@@ -1764,7 +1768,7 @@ func (m *Model) content(inner int) (string, string, []string) {
 func (m *Model) modalContent(inner int) (string, string, []string) {
 	switch m.mode {
 	case "help":
-		return "Keyboard help", "  Press any key to return", []string{"  ↑/↓ or j/k     Move selection", "  Enter          Connect/manage selected item", "  a              Add item in current section", "  m              Manage selected item", "  Tab            Move through form fields", "  ←/→            Change option or section", "  /              Search targets", "  1–6            Change admin section", "  r              Refresh data", "  q              Disconnect from SSHGateW"}
+		return "Keyboard help", "  Press any key to return", []string{"  ↑/↓ or j/k     Move selection", "  Enter          Connect/manage selected item", "  a              Add item in current section", "  m              Manage selected item", "  Tab            Move through form fields", "  ←/→            Change option or section", "  /              Search targets", "  1–7            Change admin section", "  r              Refresh data", "  q              Disconnect from SSHGateW"}
 	case "form":
 		if m.form == nil {
 			return "Form", "  Esc cancels", nil
@@ -1900,6 +1904,8 @@ func (m *Model) footer() string {
 			actions = "  Enter/m manage  •  a add  •  ←→ tabs  •  ? help  •  q quit"
 		case "grants":
 			actions = "  Enter/m manage  •  a grant access  •  ←→ tabs  •  ? help  •  q quit"
+		case "forwards":
+			actions = "  a allow destination  •  Enter/m remove  •  ←→ tabs  •  ? help  •  q quit"
 		default:
 			actions = "  ↑↓ navigate  •  ←→ tabs  •  r refresh  •  ? help  •  q quit"
 		}
