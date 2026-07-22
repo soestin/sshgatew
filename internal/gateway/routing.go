@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -55,6 +56,9 @@ func (s *Server) handleRouted(sess charmssh.Session, state authState) {
 	}
 	defer s.release(u)
 	target, err := s.store.TargetByName(sess.Context(), state.TargetName)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = errors.New("target not found or unavailable")
+	}
 	capability, protocol := store.CapabilityShell, "shell"
 	if sess.Subsystem() == "sftp" {
 		capability, protocol = store.CapabilitySFTP, "sftp"
@@ -103,7 +107,7 @@ func (s *Server) handleRouted(sess charmssh.Session, state authState) {
 	outcome := "success"
 	if err != nil {
 		outcome = "failure"
-		fmt.Fprintln(sess, "SSHGateW:", sanitize(err.Error()))
+		fmt.Fprintln(sess.Stderr(), "SSHGateW:", sanitize(err.Error()))
 		_ = sess.Exit(1)
 	}
 	var targetID *int64
@@ -132,6 +136,9 @@ func (s *Server) handleDirectTCPIP(_ *charmssh.Server, _ *gossh.ServerConn, newC
 		return
 	}
 	target, err := s.store.TargetByName(ctx, state.TargetName)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = errors.New("target not found or unavailable")
+	}
 	if err == nil && !s.store.CanAccessCapability(ctx, state.User, target.ID, store.CapabilityForward) {
 		err = errors.New("TCP forwarding is not granted")
 	}
