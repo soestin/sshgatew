@@ -6,7 +6,7 @@ The repository includes `compose.yaml` and a multi-stage `Dockerfile`. Copy an
 administrator public key to `admin.pub` and start the gateway:
 
 ```sh
-SSHGATEW_ADMIN=admin SSHGATEW_VERSION=0.7.1 docker compose up -d --build
+SSHGATEW_ADMIN=admin SSHGATEW_VERSION=latest docker compose up -d
 docker compose logs sshgatew
 ```
 
@@ -22,7 +22,7 @@ Useful overrides can be placed in an uncommitted `.env` file:
 SSHGATEW_ADMIN=admin
 SSHGATEW_ADMIN_KEY_FILE=./admin.pub
 SSHGATEW_PORT=2222
-SSHGATEW_VERSION=0.7.1
+SSHGATEW_VERSION=latest
 ```
 
 Use `docker compose down` to stop the service. Do not add `--volumes` unless

@@ -18,14 +18,22 @@ if [ ! -f "$config_path" ]; then
         echo "SSHGateW first-run setup requires a public key at $authorized_key" >&2
         exit 1
     fi
+    # Compose implementations may bind a local secret with its original 0600
+    # mode. Copy the public key while privileged so the runtime user can read
+    # it without requiring the host file to be world-readable.
+    bootstrap_key=/tmp/sshgatew-bootstrap-admin.pub
+    cp "$authorized_key" "$bootstrap_key"
+    chown sshgatew:sshgatew "$bootstrap_key"
+    chmod 0400 "$bootstrap_key"
     echo "Initializing SSHGateW for administrator $admin..."
     su-exec sshgatew:sshgatew /usr/local/bin/sshgatew \
         --config "$config_path" \
         init \
         --admin "$admin" \
-        --authorized-key "$authorized_key" \
+        --authorized-key "$bootstrap_key" \
         --data-dir "$data_dir" \
         --listen "$listen"
+    rm -f -- "$bootstrap_key"
 fi
 
 chown root:sshgatew "$config_dir" "$config_path"

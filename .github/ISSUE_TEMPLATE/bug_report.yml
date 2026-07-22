@@ -10,7 +10,7 @@ body:
     id: version
     attributes:
       label: SSHGateW version
-      placeholder: 0.7.1
+      placeholder: 0.7.2
     validations:
       required: true
   - type: dropdown
