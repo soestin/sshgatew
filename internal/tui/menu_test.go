@@ -110,6 +110,9 @@ func TestEmptyForwardsViewExplainsHowToAllowDestination(t *testing.T) {
 		if !strings.Contains(view, "a allow destination") {
 			t.Fatalf("%d-column footer omitted add shortcut: %q", width, view)
 		}
+		if width >= 80 && !strings.Contains(view, "Enter/m manage") {
+			t.Fatalf("%d-column footer did not use the standard manage action: %q", width, view)
+		}
 	}
 }
 
