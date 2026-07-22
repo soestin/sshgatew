@@ -29,6 +29,7 @@ COPY --chmod=0755 deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.s
 
 EXPOSE 2222
 VOLUME ["/etc/sshgatew", "/var/lib/sshgatew"]
+STOPSIGNAL SIGTERM
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["serve"]

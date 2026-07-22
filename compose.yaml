@@ -6,7 +6,6 @@ services:
         VERSION: ${SSHGATEW_VERSION:-dev}
     image: ghcr.io/soestin/sshgatew:${SSHGATEW_VERSION:-latest}
     restart: unless-stopped
-    init: true
     ports:
       - "${SSHGATEW_PORT:-2222}:2222"
     environment:
