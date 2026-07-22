@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,8 +19,6 @@ import (
 	"sshgatew/internal/store"
 	"sshgatew/internal/tui"
 )
-
-type contextKey struct{}
 
 type Server struct {
 	cfg       config.Config
@@ -55,7 +52,7 @@ func New(cfg config.Config, st *store.Store, cipher *secrets.Cipher, log *slog.L
 		return nil, fmt.Errorf("parse gateway host key: %w", err)
 	}
 	s := &Server{cfg: cfg, store: st, cipher: cipher, connector: downstream.Connector{Timeout: cfg.DownstreamTimeout.Value()}, log: log, perUser: map[int64]int{}}
-	s.ssh = &charmssh.Server{Addr: cfg.ListenAddress, Handler: s.handle, PublicKeyHandler: s.authenticate, PtyCallback: func(_ charmssh.Context, p charmssh.Pty) bool { return p.Term != "" }, SessionRequestCallback: func(_ charmssh.Session, typ string) bool { return typ == "shell" }, IdleTimeout: cfg.IdleTimeout.Value(), Version: "SSHGateW_0.1"}
+	s.ssh = &charmssh.Server{Addr: cfg.ListenAddress, Handler: s.handle, ServerConfigCallback: s.serverConfig, KeyboardInteractiveHandler: func(charmssh.Context, gossh.KeyboardInteractiveChallenge) bool { return false }, PtyCallback: func(_ charmssh.Context, p charmssh.Pty) bool { return p.Term != "" }, SessionRequestCallback: s.allowSessionRequest, ChannelHandlers: map[string]charmssh.ChannelHandler{"session": charmssh.DefaultSessionHandler, "direct-tcpip": s.handleDirectTCPIP}, SubsystemHandlers: map[string]charmssh.SubsystemHandler{"sftp": s.handle}, IdleTimeout: cfg.IdleTimeout.Value(), Version: "SSHGateW_0.8"}
 	s.ssh.AddHostKey(signer)
 	return s, nil
 }
@@ -63,24 +60,6 @@ func New(cfg config.Config, st *store.Store, cipher *secrets.Cipher, log *slog.L
 func (s *Server) ListenAndServe() error              { return s.ssh.ListenAndServe() }
 func (s *Server) Shutdown(ctx context.Context) error { return s.ssh.Shutdown(ctx) }
 
-func (s *Server) authenticate(ctx charmssh.Context, key charmssh.PublicKey) bool {
-	fp := gossh.FingerprintSHA256(key)
-	u, err := s.store.AuthenticateKey(ctx, ctx.User(), fp)
-	outcome := "success"
-	if err != nil {
-		outcome = "denied"
-	}
-	uid := nullableUserID(u, err)
-	_ = s.store.Audit(context.Background(), store.AuditEvent{ActorUserID: uid, ClaimedUsername: ctx.User(), SourceAddress: ctx.RemoteAddr().String(), EventType: "gateway.auth", Outcome: outcome, Details: jsonString(map[string]any{"key_fingerprint": fp})})
-	if err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			s.log.Error("gateway authentication lookup failed", "error", err)
-		}
-		return false
-	}
-	ctx.SetValue(contextKey{}, u)
-	return true
-}
 func nullableUserID(u store.User, err error) *int64 {
 	if err != nil {
 		return nil
@@ -110,11 +89,15 @@ func (s *Server) release(u store.User) {
 }
 
 func (s *Server) handle(sess charmssh.Session) {
-	v := sess.Context().Value(contextKey{})
-	u, ok := v.(store.User)
+	state, ok := s.stateFromContext(sess.Context())
 	if !ok {
 		fmt.Fprintln(sess, "Authentication context unavailable.")
 		_ = sess.Exit(1)
+		return
+	}
+	u := state.User
+	if state.TargetName != "" {
+		s.handleRouted(sess, state)
 		return
 	}
 	if _, _, ok := sess.Pty(); !ok {
@@ -129,20 +112,6 @@ func (s *Server) handle(sess charmssh.Session) {
 		return
 	}
 	defer s.release(u)
-	if u.TOTPEnabled {
-		pty, windows, _ := sess.Pty()
-		challenge := tui.NewTOTPChallenge(sess.Context(), s.store, s.cipher, sess.RemoteAddr().String(), u)
-		result, err := tui.RunRemote(sess.Context(), sess, pty.Window, windows, challenge)
-		outcome := "success"
-		if err != nil || !result.Verified {
-			outcome = "denied"
-		}
-		_ = s.store.Audit(context.Background(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "gateway.totp", Outcome: outcome})
-		if outcome != "success" {
-			_ = sess.Exit(1)
-			return
-		}
-	}
 	_ = s.store.Audit(sess.Context(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "gateway.session.start", Outcome: "success"})
 	defer s.store.Audit(context.Background(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "gateway.session.end", Outcome: "success"})
 	status := ""

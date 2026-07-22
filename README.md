@@ -17,11 +17,14 @@ encrypted at rest.
 - Optional per-user TOTP second-factor authentication with terminal QR enrollment.
 - Member and administrator terminal interfaces.
 - Per-user and per-group target grants.
+- Per-protocol shell, SFTP/SCP, and TCP-forwarding capabilities.
 - Password, reusable stored-key, per-target private-key, and restricted forwarded-agent authentication.
 - Exact downstream host-key pinning; changed keys are rejected.
 - XChaCha20-Poly1305 encrypted credentials with a separate master-key file.
 - SQLite persistence, metadata auditing, session limits, and JSON logs.
-- No remote exec, SFTP, SCP, TCP forwarding, downstream agent exposure, or terminal recording.
+- Routed `user+target` logins for direct shells, SFTP, SCP, and restricted local forwarding.
+- Exact per-target TCP destination allowlists; reverse forwarding remains disabled.
+- No arbitrary remote exec, downstream agent exposure, or terminal recording.
 
 ## Build
 
@@ -188,6 +191,25 @@ For a FIDO/YubiKey or another local-agent identity, choose `forwarded_agent`
 in the TUI or use `--auth forwarded_agent --key-file PUBLIC_KEY`. Connect to
 the gateway with `ssh -A`. SSHGateW permits only the configured public key and
 closes the agent channel immediately after downstream authentication.
+
+## Direct protocol routing
+
+Use `USER+TARGET` to bypass the target menu. Authorization, pinned host-key
+verification, encrypted credentials, session limits, TOTP, and auditing still
+apply:
+
+```sh
+ssh -p 2222 justin+production@gateway.example.com
+sftp -P 2222 justin+production@gateway.example.com
+scp -P 2222 ./release.tar justin+production:/tmp/
+ssh -N -p 2222 -L 5432:127.0.0.1:5432 justin+production@gateway.example.com
+```
+
+Modern SCP is transported through SFTP. Legacy `scp -O` is supported through a
+strictly parsed downstream SCP command. TCP forwarding requires both the
+grant's `TCP forwarding` capability and an exact destination configured in the
+TUI's `FORWARDS` section. Dynamic forwarding works only for destinations on
+that allowlist. Reverse forwarding is intentionally rejected.
 
 Run local administration commands as the `sshgatew` service user to avoid
 creating SQLite WAL files with incompatible ownership.
