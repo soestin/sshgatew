@@ -148,7 +148,7 @@ func TestPublicKeyLoginAndInteractiveTUI(t *testing.T) {
 	select {
 	case err = <-wait:
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("session failed: %v output=%q", err, output.String())
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatalf("TUI did not exit; output=%q", output.String())
@@ -167,8 +167,19 @@ func TestPublicKeyLoginAndInteractiveTUI(t *testing.T) {
 	if err = st.SetUserTOTP(context.Background(), u.ID, nonce, ciphertext); err != nil {
 		t.Fatal(err)
 	}
+	code, _, err := totp.Code(secret, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
 	_ = client.Close()
-	client, err = gossh.Dial("tcp", cfg.ListenAddress, clientCfg)
+	totpClientCfg := &gossh.ClientConfig{User: "alice", Auth: []gossh.AuthMethod{gossh.PublicKeys(clientSigner), gossh.KeyboardInteractive(func(_, _ string, questions []string, _ []bool) ([]string, error) {
+		answers := make([]string, len(questions))
+		for i := range answers {
+			answers[i] = code
+		}
+		return answers, nil
+	})}, HostKeyCallback: gossh.InsecureIgnoreHostKey(), Timeout: time.Second}
+	client, err = gossh.Dial("tcp", cfg.ListenAddress, totpClientCfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,18 +200,12 @@ func TestPublicKeyLoginAndInteractiveTUI(t *testing.T) {
 	if err = totpSession.Shell(); err != nil {
 		t.Fatal(err)
 	}
-	code, _, err := totp.Code(secret, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(100 * time.Millisecond)
-	_, _ = io.WriteString(totpInput, code+"\r")
 	time.Sleep(200 * time.Millisecond)
 	_, _ = io.WriteString(totpInput, "q")
 	if err = totpSession.Wait(); err != nil {
 		t.Fatal(err)
 	}
-	if got := totpOutput.String(); !strings.Contains(got, "Two-factor authentication") || !strings.Contains(got, "Connection profiles") {
+	if got := totpOutput.String(); !strings.Contains(got, "Connection profiles") {
 		t.Fatalf("TOTP login did not reach the main TUI: %q", got)
 	}
 	badCfg := &gossh.ClientConfig{User: "alice", Auth: []gossh.AuthMethod{gossh.PublicKeys(signer(t))}, HostKeyCallback: gossh.InsecureIgnoreHostKey(), Timeout: time.Second}

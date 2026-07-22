@@ -9,6 +9,10 @@ const (
 	CredentialPrivateKey = "private_key"
 	CredentialAgent      = "forwarded_agent"
 	CredentialStoredKey  = "stored_key"
+	CapabilityShell      = "shell"
+	CapabilitySFTP       = "sftp"
+	CapabilitySCP        = "scp"
+	CapabilityForward    = "tcp_forward"
 )
 
 type User struct {
@@ -57,5 +61,13 @@ type AuditEvent struct {
 	TargetID                                  *int64
 	Outcome, Details                          string
 }
-type Grant struct{ Target, Kind, Principal string }
+type Grant struct {
+	Target, Kind, Principal      string
+	Shell, SFTP, SCP, TCPForward bool
+}
+type ForwardRule struct {
+	ID, TargetID int64
+	Target, Host string
+	Port         int
+}
 type GroupMember struct{ Group, Username string }

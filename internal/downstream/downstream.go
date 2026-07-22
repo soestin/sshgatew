@@ -83,16 +83,28 @@ func ScanHostKey(ctx context.Context, address string, timeout time.Duration) (go
 }
 
 func (c Connector) Connect(ctx context.Context, inbound charmssh.Session, windows <-chan charmssh.Window, t store.Target, credential secrets.Payload, forwarded *AgentConnection) error {
+	client, err := c.Dial(ctx, t, credential, forwarded)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	return ProxyShell(ctx, client, inbound, windows)
+}
+
+// Dial creates an authenticated, host-key-pinned downstream SSH client.  The
+// caller owns the returned client. A forwarded agent is deliberately closed as
+// soon as authentication completes and is never exposed to the target session.
+func (c Connector) Dial(ctx context.Context, t store.Target, credential secrets.Payload, forwarded *AgentConnection) (*gossh.Client, error) {
 	if forwarded != nil {
 		defer forwarded.Close()
 	}
 	pinned, err := ParseHostKey(t.HostPublicKey)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	auth, err := authMethod(t.CredentialKind, credential, forwarded)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	addr := net.JoinHostPort(t.Host, fmt.Sprint(t.Port))
 	cfg := &gossh.ClientConfig{User: t.RemoteUsername, Auth: []gossh.AuthMethod{auth}, HostKeyCallback: func(_ string, _ net.Addr, key gossh.PublicKey) error {
@@ -104,20 +116,22 @@ func (c Connector) Connect(ctx context.Context, inbound charmssh.Session, window
 	d := net.Dialer{Timeout: c.Timeout}
 	raw, err := d.DialContext(ctx, "tcp", addr)
 	if err != nil {
-		return fmt.Errorf("dial downstream: %w", err)
+		return nil, fmt.Errorf("dial downstream: %w", err)
 	}
-	defer raw.Close()
 	cc, chans, reqs, err := gossh.NewClientConn(raw, addr, cfg)
 	if err != nil {
-		return fmt.Errorf("downstream handshake: %w", err)
+		raw.Close()
+		return nil, fmt.Errorf("downstream handshake: %w", err)
 	}
 	// The forwarded agent is used only for the authentication handshake. It is
 	// deliberately not exposed to the downstream shell.
 	if forwarded != nil {
 		_ = forwarded.Close()
 	}
-	client := gossh.NewClient(cc, chans, reqs)
-	defer client.Close()
+	return gossh.NewClient(cc, chans, reqs), nil
+}
+
+func ProxyShell(ctx context.Context, client *gossh.Client, inbound charmssh.Session, windows <-chan charmssh.Window) error {
 	sess, err := client.NewSession()
 	if err != nil {
 		return fmt.Errorf("create downstream session: %w", err)

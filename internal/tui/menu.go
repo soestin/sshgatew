@@ -37,6 +37,7 @@ type pendingOperation struct {
 	target                                    store.Target
 	user                                      store.User
 	grant                                     store.Grant
+	forwardRule                               store.ForwardRule
 	identity                                  store.SSHIdentity
 	identityID                                int64
 	privateKey                                []byte
@@ -76,6 +77,7 @@ type Model struct {
 	groupMembers          []store.GroupMember
 	identities            []store.SSHIdentity
 	grants                []store.Grant
+	forwardRules          []store.ForwardRule
 	auditEvents           []store.AuditEvent
 	mode, input           string
 	searching             bool
@@ -108,6 +110,7 @@ type dataMsg struct {
 	groupMembers []store.GroupMember
 	identities   []store.SSHIdentity
 	grants       []store.Grant
+	forwardRules []store.ForwardRule
 	auditEvents  []store.AuditEvent
 	err          error
 }
@@ -148,6 +151,9 @@ func (m *Model) load() tea.Msg {
 			d.grants, d.err = m.store.ListGrants(m.ctx)
 		}
 		if d.err == nil {
+			d.forwardRules, d.err = m.store.ListForwardRules(m.ctx)
+		}
+		if d.err == nil {
 			d.auditEvents, d.err = m.store.ListAudit(m.ctx, 50)
 		}
 	}
@@ -158,7 +164,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reloadMsg:
 		return m, m.load
 	case dataMsg:
-		m.targets, m.users, m.groups, m.groupMembers, m.identities, m.grants, m.auditEvents = v.targets, v.users, v.groups, v.groupMembers, v.identities, v.grants, v.auditEvents
+		m.targets, m.users, m.groups, m.groupMembers, m.identities, m.grants, m.forwardRules, m.auditEvents = v.targets, v.users, v.groups, v.groupMembers, v.identities, v.grants, v.forwardRules, v.auditEvents
 		if v.err != nil {
 			m.status = v.err.Error()
 		}
@@ -254,6 +260,9 @@ func (m *Model) handleKey(key string) tea.Cmd {
 			m.section = "grants"
 			m.cursor = 0
 		case "6":
+			m.section = "forwards"
+			m.cursor = 0
+		case "7":
 			m.section = "audit"
 			m.cursor = 0
 		case "r":
@@ -486,7 +495,13 @@ func (m *Model) openAddForm() tea.Cmd {
 			m.status = "Add a target and a user or group before creating access."
 			return nil
 		}
-		m.form = &adminForm{kind: "grant_add", title: "Add access grant", fields: []formField{{label: "Target", value: m.targets[0].Name, options: targetNames(m.targets)}, {label: "Principal type", value: "user", options: []string{"user", "group"}}, {label: "Principal", value: firstUser(m.users), options: userNames(m.users)}}}
+		m.form = &adminForm{kind: "grant_add", title: "Add access grant", fields: []formField{{label: "Target", value: m.targets[0].Name, options: targetNames(m.targets)}, {label: "Principal type", value: "user", options: []string{"user", "group"}}, {label: "Principal", value: firstUser(m.users), options: userNames(m.users)}, {label: "Shell", value: "yes", options: []string{"yes", "no"}}, {label: "SFTP", value: "yes", options: []string{"yes", "no"}}, {label: "Legacy SCP", value: "yes", options: []string{"yes", "no"}}, {label: "TCP forwarding", value: "no", options: []string{"no", "yes"}}}}
+	case "forwards":
+		if len(m.targets) == 0 {
+			m.status = "Add a target before creating a forwarding rule."
+			return nil
+		}
+		m.form = &adminForm{kind: "forward_add", title: "Allow TCP destination", fields: []formField{{label: "Target", value: m.targets[0].Name, options: targetNames(m.targets)}, {label: "Destination host"}, {label: "Destination port"}}}
 	default:
 		m.status = "This section is read-only."
 		return nil
@@ -554,7 +569,14 @@ func (m *Model) openSelectedActions() tea.Cmd {
 			return nil
 		}
 		m.pending = &pendingOperation{grant: m.grants[m.cursor]}
-		m.actions = []actionItem{{"Remove access", "grant_delete"}}
+		m.actions = []actionItem{{"Edit capabilities", "grant_edit"}, {"Remove access", "grant_delete"}}
+	case "forwards":
+		if len(m.forwardRules) == 0 {
+			m.status = "No forwarding rule selected."
+			return nil
+		}
+		m.pending = &pendingOperation{forwardRule: m.forwardRules[m.cursor]}
+		m.actions = []actionItem{{"Delete destination", "forward_delete"}}
 	default:
 		return nil
 	}
@@ -600,6 +622,16 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 	case "target_connect":
 		m.result = &Result{TargetID: p.target.ID}
 		return tea.Quit
+	case "grant_edit":
+		g := p.grant
+		yesNo := func(v bool) string {
+			if v {
+				return "yes"
+			}
+			return "no"
+		}
+		m.form = &adminForm{kind: "grant_edit", title: "Edit " + g.Principal + " → " + g.Target, fields: []formField{{label: "Shell", value: yesNo(g.Shell), options: []string{"yes", "no"}}, {label: "SFTP", value: yesNo(g.SFTP), options: []string{"yes", "no"}}, {label: "Legacy SCP", value: yesNo(g.SCP), options: []string{"yes", "no"}}, {label: "TCP forwarding", value: yesNo(g.TCPForward), options: []string{"yes", "no"}}}}
+		m.mode = "form"
 	case "target_edit":
 		m.form = &adminForm{kind: "target_edit", title: "Edit " + p.target.Name, fields: []formField{{label: "Host", value: p.target.Host}, {label: "Port", value: strconv.Itoa(p.target.Port)}, {label: "Remote user", value: p.target.RemoteUsername}}}
 		m.mode = "form"
@@ -613,7 +645,7 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 	case "target_toggle":
 		enabled := !p.target.Enabled
 		return m.mutate("targets", "Target updated.", "admin.target."+enabledWord(enabled), map[string]any{"target": p.target.Name}, func() error { return m.store.SetTargetEnabled(m.ctx, p.target.Name, enabled) })
-	case "target_delete", "user_delete", "group_delete", "grant_delete", "identity_delete", "user_totp_remove":
+	case "target_delete", "user_delete", "group_delete", "grant_delete", "forward_delete", "identity_delete", "user_totp_remove":
 		p.kind = code
 		m.mode = "confirm_delete"
 	case "identity_view":
@@ -838,7 +870,21 @@ func (m *Model) submitForm() tea.Cmd {
 	case "group_add":
 		return m.mutate("groups", "Group added.", "admin.group.add", map[string]any{"group": values[0]}, func() error { return m.store.AddGroup(m.ctx, values[0]) })
 	case "grant_add":
-		return m.mutate("grants", "Access granted.", "admin.grant.add", map[string]any{"target": values[0], "kind": values[1], "principal": values[2]}, func() error { return m.store.SetGrant(m.ctx, values[0], values[1], values[2], true) })
+		return m.mutate("grants", "Access granted.", "admin.grant.add", map[string]any{"target": values[0], "kind": values[1], "principal": values[2]}, func() error {
+			return m.store.SetGrantCapabilities(m.ctx, values[0], values[1], values[2], true, values[3] == "yes", values[4] == "yes", values[5] == "yes", values[6] == "yes")
+		})
+	case "grant_edit":
+		g := m.pending.grant
+		return m.mutate("grants", "Grant capabilities updated.", "admin.grant.edit", map[string]any{"target": g.Target, "kind": g.Kind, "principal": g.Principal}, func() error {
+			return m.store.SetGrantCapabilities(m.ctx, g.Target, g.Kind, g.Principal, true, values[0] == "yes", values[1] == "yes", values[2] == "yes", values[3] == "yes")
+		})
+	case "forward_add":
+		port, err := strconv.Atoi(values[2])
+		if err != nil || port < 1 || port > 65535 {
+			m.status, f.index = "Port must be between 1 and 65535.", 2
+			return nil
+		}
+		return m.mutate("forwards", "TCP destination allowed.", "admin.forward.add", map[string]any{"target": values[0], "host": values[1], "port": port}, func() error { return m.store.AddForwardRule(m.ctx, values[0], values[1], port) })
 	case "target_edit":
 		port, err := strconv.Atoi(values[1])
 		if err != nil || port < 1 || port > 65535 {
@@ -934,6 +980,9 @@ func (m *Model) finishDelete() tea.Cmd {
 	case "grant_delete":
 		g := p.grant
 		return m.mutate("grants", "Access removed.", "admin.grant.remove", map[string]any{"target": g.Target, "kind": g.Kind, "principal": g.Principal}, func() error { return m.store.SetGrant(m.ctx, g.Target, g.Kind, g.Principal, false) })
+	case "forward_delete":
+		r := p.forwardRule
+		return m.mutate("forwards", "TCP destination removed.", "admin.forward.remove", map[string]any{"target": r.Target, "host": r.Host, "port": r.Port}, func() error { return m.store.DeleteForwardRule(m.ctx, r.ID) })
 	case "user_totp_remove":
 		return m.mutate("users", "TOTP removed.", "admin.user.totp.remove", map[string]any{"username": p.username}, func() error { return m.store.RemoveUserTOTP(m.ctx, p.user.ID) })
 	case "identity_delete":
@@ -1438,6 +1487,8 @@ func (m *Model) itemCount() int {
 		return len(m.groups)
 	case "grants":
 		return len(m.grants)
+	case "forwards":
+		return len(m.forwardRules)
 	case "audit":
 		return len(m.auditEvents)
 	default:
@@ -1466,7 +1517,7 @@ func (m *Model) pageSize() int {
 	return h - 8
 }
 func (m *Model) changeSection(delta int) {
-	sections := []string{"targets", "keys", "users", "groups", "grants", "audit"}
+	sections := []string{"targets", "keys", "users", "groups", "grants", "forwards", "audit"}
 	current := 0
 	for i, section := range sections {
 		if section == m.section {
@@ -1601,7 +1652,7 @@ func (m *Model) tabLine(w int) string {
 	if m.user.Role != store.RoleAdmin {
 		return fit("  CONNECTION PROFILES", w)
 	}
-	sections := []struct{ key, name string }{{"1", "targets"}, {"2", "keys"}, {"3", "users"}, {"4", "groups"}, {"5", "grants"}, {"6", "audit"}}
+	sections := []struct{ key, name string }{{"1", "targets"}, {"2", "keys"}, {"3", "users"}, {"4", "groups"}, {"5", "grants"}, {"6", "forwards"}, {"7", "audit"}}
 	parts := make([]string, 0, len(sections))
 	for _, s := range sections {
 		name := strings.ToUpper(s.name)
@@ -1662,9 +1713,27 @@ func (m *Model) content(inner int) (string, string, []string) {
 		return "Groups", dim + "  Access-control groups" + reset, rows
 	case "grants":
 		for _, g := range m.grants {
-			rows = append(rows, fmt.Sprintf("  %-24s  %-7s  %s", g.Target, strings.ToUpper(g.Kind), g.Principal))
+			caps := []string{}
+			if g.Shell {
+				caps = append(caps, "shell")
+			}
+			if g.SFTP {
+				caps = append(caps, "sftp")
+			}
+			if g.SCP {
+				caps = append(caps, "scp")
+			}
+			if g.TCPForward {
+				caps = append(caps, "tcp")
+			}
+			rows = append(rows, fmt.Sprintf("  %-18s  %-7s  %-16s  %s", g.Target, strings.ToUpper(g.Kind), g.Principal, strings.Join(caps, ",")))
 		}
-		return "Grants", dim + "  Target → principal access rules" + reset, rows
+		return "Grants", dim + "  Target → principal protocol capabilities" + reset, rows
+	case "forwards":
+		for _, r := range m.forwardRules {
+			rows = append(rows, fmt.Sprintf("  %-22s  %s:%d", r.Target, r.Host, r.Port))
+		}
+		return "TCP forwarding", dim + "  Exact destinations reachable through selected targets" + reset, rows
 	case "audit":
 		for _, e := range m.auditEvents {
 			actor := e.ClaimedUsername

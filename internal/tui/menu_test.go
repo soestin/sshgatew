@@ -419,6 +419,9 @@ func TestAdminMenusManageUsersGroupsKeysAndGrants(t *testing.T) {
 	for m.form.fields[2].value != "alice" {
 		m.handleKey("right")
 	}
+	for m.form.index < len(m.form.fields)-1 {
+		m.handleKey("tab")
+	}
 	applyCommand(m, m.handleKey("enter"))
 	grants, err := st.ListGrants(context.Background())
 	if err != nil || len(grants) != 1 || grants[0].Principal != "alice" {

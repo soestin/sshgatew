@@ -8,9 +8,10 @@ downstream credential it manages. Harden and monitor the host accordingly.
 
 - Gateway users authenticate with an exact registered public-key fingerprint
   under the SSH username they claim.
-- Users with TOTP enabled must also pass an application-level RFC 6238 challenge
-  before target metadata or the gateway menu becomes available. A code counter
-  cannot be reused and five failures close the connection.
+- Users with TOTP enabled must pass RFC 6238 through SSH keyboard-interactive
+  authentication after their public key. This also protects SFTP, SCP, routed
+  shells, and forwarding connections that never open the gateway menu. A code
+  counter cannot be reused.
 - Authorization is checked when listing targets and again immediately before a
   downstream connection.
 - Downstream host public keys are pinned exactly. Unknown and changed keys fail
@@ -28,15 +29,20 @@ downstream credential it manages. Harden and monitor the host accordingly.
 - Forwarded-agent targets pin one exact public key. The agent is used only for
   the downstream authentication handshake and its channel is then closed.
 
-## Deliberately denied SSH features
+## Protocol boundaries
 
-The gateway accepts interactive PTY shell sessions only. Remote exec, SFTP,
-SCP, subsystems, local/reverse TCP forwarding, downstream agent forwarding, and
-arbitrary channel types are not enabled. An inbound agent channel is accepted
-only when a selected target explicitly uses `forwarded_agent`; it is restricted
-to the target's pinned identity and closed before the shell starts. This
-prevents the gateway account from becoming a general-purpose tunnel,
-file-transfer endpoint, or agent-forwarding hop.
+Plain `USER` sessions accept only the interactive gateway TUI. Routed
+`USER+TARGET` sessions may request a PTY shell, the SFTP subsystem, a strictly
+validated legacy SCP server command, or `direct-tcpip`. Each request is checked
+against its grant capability. TCP destinations must additionally match an
+exact target host-and-port allowlist, preventing use as a general-purpose
+proxy. Reverse forwarding, arbitrary exec commands, unknown subsystems, and
+unknown channel types are rejected.
+
+An inbound agent channel is accepted only when a selected target explicitly
+uses `forwarded_agent`; it is restricted to the target's pinned identity and
+closed immediately after authentication. TCP forwarding requires a stored
+target credential because `ssh -N` has no session on which to request an agent.
 
 ## Operational recommendations
 

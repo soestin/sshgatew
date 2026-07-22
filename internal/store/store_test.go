@@ -59,7 +59,7 @@ INSERT INTO targets(name,host,port,remote_username,credential_kind,host_key_algo
 		t.Fatalf("forwarded-agent target rejected after migration: %v", err)
 	}
 	var version int
-	if err = store.DB().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 5 {
+	if err = store.DB().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 6 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 }
@@ -88,6 +88,41 @@ func TestTOTPStorageAndReplayProtection(t *testing.T) {
 	}
 	if err = s.RemoveUserTOTP(ctx, u.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestProtocolCapabilitiesAndForwardRules(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	u, err := s.AddUser(ctx, "operator", RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := s.AddTarget(ctx, NewTarget{Name: "prod", Host: "127.0.0.1", Port: 22, RemoteUsername: "root", CredentialKind: CredentialPassword, HostKeyAlgorithm: "ssh-ed25519", HostPublicKey: "ssh-ed25519 AAAA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetGrantCapabilities(ctx, "prod", "user", u.Username, true, true, true, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if !s.CanAccessCapability(ctx, u, target.ID, CapabilityShell) || !s.CanAccessCapability(ctx, u, target.ID, CapabilitySFTP) || !s.CanAccessCapability(ctx, u, target.ID, CapabilityForward) {
+		t.Fatal("enabled capabilities were denied")
+	}
+	if s.CanAccessCapability(ctx, u, target.ID, CapabilitySCP) {
+		t.Fatal("disabled SCP capability was allowed")
+	}
+	if s.ForwardAllowed(ctx, target.ID, "db.internal", 5432) {
+		t.Fatal("unconfigured destination was allowed")
+	}
+	if err = s.AddForwardRule(ctx, "prod", "db.internal", 5432); err != nil {
+		t.Fatal(err)
+	}
+	if !s.ForwardAllowed(ctx, target.ID, "DB.INTERNAL", 5432) || s.ForwardAllowed(ctx, target.ID, "db.internal", 5433) {
+		t.Fatal("exact forwarding rule was not enforced")
+	}
+	rules, err := s.ListForwardRules(ctx)
+	if err != nil || len(rules) != 1 {
+		t.Fatalf("rules=%#v err=%v", rules, err)
 	}
 }
 func TestReusableSSHIdentityTargetAndDeletionSafety(t *testing.T) {

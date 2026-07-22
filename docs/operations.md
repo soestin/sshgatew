@@ -82,7 +82,13 @@ grants add|remove --target TARGET --group GROUP
 ```
 
 Administrators can access every enabled target. Members receive the union of
-their direct and group grants.
+their direct and group grants. In the TUI, a grant independently controls
+shell, SFTP, legacy SCP, and TCP-forwarding access. Existing grants are migrated
+with shell/SFTP/SCP enabled and TCP forwarding disabled.
+
+TCP forwarding also requires an exact destination rule. Manage these under the
+TUI's `FORWARDS` section by selecting a target, destination hostname/IP, and
+port. There are no wildcard rules.
 
 ## Targets
 
@@ -123,6 +129,23 @@ agent channel is closed immediately after authentication and is never exposed
 inside the downstream shell. Without `-A`, SSHGateW returns to the target menu
 with an actionable error.
 
+## Routed clients and file transfer
+
+Append the target name to the gateway username:
+
+```sh
+ssh -p 2222 admin+production@gateway.example.com
+sftp -P 2222 admin+production@gateway.example.com
+scp -P 2222 ./artifact admin+production:/srv/releases/
+ssh -N -p 2222 -L 5432:127.0.0.1:5432 admin+production@gateway.example.com
+```
+
+TOTP-enabled users are prompted by SSH keyboard-interactive authentication, so
+the same second factor protects noninteractive clients. Modern OpenSSH SCP uses
+SFTP automatically. Use `scp -O` only for old downstream servers. Local (`-L`)
+and dynamic (`-D`) forwarding use `direct-tcpip`; each requested destination
+must be explicitly allowed. Remote (`-R`) forwarding is disabled.
+
 ## Remote administrator TUI
 
 Administrators can browse targets, reusable SSH keys, users, groups, grants,
@@ -130,7 +153,7 @@ and recent audit events. The interface adapts to the SSH terminal size and pagin
 Resize events redraw it in place without disconnecting the session.
 
 Use Up/Down or `j`/`k` to select, PgUp/PgDn to change pages, Home/End to jump,
-Enter to connect, `/` to search, `1`–`6` or Left/Right to change administrator
+Enter to connect, `/` to search, `1`–`7` or Left/Right to change administrator
 sections, `?` for help, and `q` to leave. Administrators perform changes through
 contextual menus—no command syntax is required. Press `a` to add an item in the
 current section. Press Enter or `m` to manage the selected user, group, grant,
