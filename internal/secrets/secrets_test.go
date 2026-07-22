@@ -31,6 +31,33 @@ func TestCipherRoundTripAndBinding(t *testing.T) {
 		t.Fatal("tamper not detected")
 	}
 }
+func TestSSHIdentityCipherRoundTripAndNamespaceBinding(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "key")
+	if err := Generate(p); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, ciphertext, err := c.EncryptSSHIdentity(12, Payload{PrivateKey: []byte("private-material")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.DecryptSSHIdentity(12, nonce, ciphertext)
+	if err != nil || string(got.PrivateKey) != "private-material" {
+		t.Fatalf("identity round trip: %#v %v", got, err)
+	}
+	if _, err = c.DecryptSSHIdentity(13, nonce, ciphertext); err == nil {
+		t.Fatal("identity binding not enforced")
+	}
+	if _, err = c.Decrypt(12, CredentialKindForTest, nonce, ciphertext); err == nil {
+		t.Fatal("identity ciphertext was accepted in target namespace")
+	}
+}
+
+const CredentialKindForTest = "private_key"
+
 func TestPermissions(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "key")
 	if err := Generate(p); err != nil {

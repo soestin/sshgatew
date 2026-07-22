@@ -3,7 +3,10 @@ package tui
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -32,6 +35,9 @@ type pendingOperation struct {
 	target                                    store.Target
 	user                                      store.User
 	grant                                     store.Grant
+	identity                                  store.SSHIdentity
+	identityID                                int64
+	privateKey                                []byte
 	hostKey                                   gossh.PublicKey
 }
 
@@ -64,6 +70,7 @@ type Model struct {
 	users                 []store.User
 	groups                []store.Group
 	groupMembers          []store.GroupMember
+	identities            []store.SSHIdentity
 	grants                []store.Grant
 	auditEvents           []store.AuditEvent
 	mode, input           string
@@ -91,6 +98,7 @@ type dataMsg struct {
 	users        []store.User
 	groups       []store.Group
 	groupMembers []store.GroupMember
+	identities   []store.SSHIdentity
 	grants       []store.Grant
 	auditEvents  []store.AuditEvent
 	err          error
@@ -123,6 +131,9 @@ func (m *Model) load() tea.Msg {
 			d.groups, d.err = m.store.ListGroups(m.ctx)
 		}
 		if d.err == nil {
+			d.identities, d.err = m.store.ListSSHIdentities(m.ctx)
+		}
+		if d.err == nil {
 			d.groupMembers, d.err = m.store.ListGroupMembers(m.ctx)
 		}
 		if d.err == nil {
@@ -139,7 +150,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reloadMsg:
 		return m, m.load
 	case dataMsg:
-		m.targets, m.users, m.groups, m.groupMembers, m.grants, m.auditEvents = v.targets, v.users, v.groups, v.groupMembers, v.grants, v.auditEvents
+		m.targets, m.users, m.groups, m.groupMembers, m.identities, m.grants, m.auditEvents = v.targets, v.users, v.groups, v.groupMembers, v.identities, v.grants, v.auditEvents
 		if v.err != nil {
 			m.status = v.err.Error()
 		}
@@ -223,15 +234,18 @@ func (m *Model) handleKey(key string) tea.Cmd {
 			m.section = "targets"
 			m.cursor = 0
 		case "2":
-			m.section = "users"
+			m.section = "keys"
 			m.cursor = 0
 		case "3":
-			m.section = "groups"
+			m.section = "users"
 			m.cursor = 0
 		case "4":
-			m.section = "grants"
+			m.section = "groups"
 			m.cursor = 0
 		case "5":
+			m.section = "grants"
+			m.cursor = 0
+		case "6":
 			m.section = "audit"
 			m.cursor = 0
 		case "r":
@@ -303,6 +317,9 @@ func (m *Model) handleModeKey(key string) tea.Cmd {
 		return m.handleFormKey(key)
 	case "actions", "key_remove", "member_add", "member_remove":
 		return m.handleActionKey(key)
+	case "identity_public":
+		m.closeModal("")
+		return nil
 	case "confirm_delete":
 		if key == "y" {
 			return m.finishDelete()
@@ -341,6 +358,8 @@ func (m *Model) handleModeKey(key string) tea.Cmd {
 				m.mode = "secret_key"
 				m.input = ""
 				m.status = "Paste the private key; its contents will not be rendered. Press Ctrl+D when complete."
+			} else if m.pending.credentialKind == store.CredentialStoredKey {
+				return m.finishStoredTarget()
 			} else {
 				m.mode = "agent_key"
 				m.input = ""
@@ -357,11 +376,14 @@ func (m *Model) handleModeKey(key string) tea.Cmd {
 			keyBytes := []byte(m.input)
 			_, err := gossh.ParsePrivateKey(keyBytes)
 			if err == nil {
+				if m.pending.kind == "identity_add" {
+					return m.finishIdentity(keyBytes)
+				}
 				return m.finishCredential(secrets.Payload{PrivateKey: keyBytes})
 			}
 			var missing *gossh.PassphraseMissingError
 			if errors.As(err, &missing) {
-				m.pending.target.Ciphertext = keyBytes
+				m.pending.privateKey = keyBytes
 				m.mode = "secret_passphrase"
 				m.input = ""
 				m.status = "Encrypted key received. Enter its passphrase (hidden), then press Enter."
@@ -377,11 +399,14 @@ func (m *Model) handleModeKey(key string) tea.Cmd {
 		}
 	case "secret_passphrase":
 		if key == "enter" {
-			keyBytes := m.pending.target.Ciphertext
+			keyBytes := m.pending.privateKey
 			if _, err := gossh.ParsePrivateKeyWithPassphrase(keyBytes, []byte(m.input)); err != nil {
 				m.status = "Invalid passphrase: " + err.Error()
 				m.input = ""
 				return nil
+			}
+			if m.pending.kind == "identity_add" {
+				return m.finishIdentityWithPassphrase(keyBytes, m.input)
 			}
 			return m.finishCredential(secrets.Payload{PrivateKey: keyBytes, Passphrase: m.input})
 		}
@@ -422,7 +447,9 @@ func (m *Model) openAddForm() tea.Cmd {
 	}
 	switch m.section {
 	case "targets":
-		m.form = &adminForm{kind: "target_add", title: "Add target", fields: []formField{{label: "Name"}, {label: "Host"}, {label: "Port", value: "22"}, {label: "Remote user"}, {label: "Authentication", value: store.CredentialPrivateKey, options: []string{store.CredentialPrivateKey, store.CredentialPassword, store.CredentialAgent}}}}
+		m.form = &adminForm{kind: "target_add", title: "Add target", fields: []formField{{label: "Name"}, {label: "Host"}, {label: "Port", value: "22"}, {label: "Remote user"}, {label: "Authentication", value: store.CredentialPrivateKey, options: credentialKinds()}}}
+	case "keys":
+		m.form = &adminForm{kind: "identity_add", title: "Add SSH key", fields: []formField{{label: "Name"}, {label: "Method", value: "generate_ed25519", options: []string{"generate_ed25519", "import_private_key"}}}}
 	case "users":
 		m.form = &adminForm{kind: "user_add", title: "Add user", fields: []formField{{label: "Username"}, {label: "Role", value: store.RoleMember, options: []string{store.RoleMember, store.RoleAdmin}}}}
 	case "groups":
@@ -476,6 +503,13 @@ func (m *Model) openSelectedActions() tea.Cmd {
 			state = "Enable"
 		}
 		m.actions = []actionItem{{"Add SSH key", "user_key_add"}, {"Remove SSH key", "user_key_remove"}, {role, "user_role"}, {state, "user_toggle"}, {"Delete", "user_delete"}}
+	case "keys":
+		if len(m.identities) == 0 {
+			m.status = "No SSH key selected."
+			return nil
+		}
+		m.pending = &pendingOperation{identity: m.identities[m.cursor]}
+		m.actions = []actionItem{{"View public key", "identity_view"}, {"Delete", "identity_delete"}}
 	case "groups":
 		if len(m.groups) == 0 {
 			m.status = "No group selected."
@@ -539,7 +573,8 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 		m.form = &adminForm{kind: "target_edit", title: "Edit " + p.target.Name, fields: []formField{{label: "Host", value: p.target.Host}, {label: "Port", value: strconv.Itoa(p.target.Port)}, {label: "Remote user", value: p.target.RemoteUsername}}}
 		m.mode = "form"
 	case "target_credential":
-		m.form = &adminForm{kind: "target_credential", title: "Replace credential", fields: []formField{{label: "Authentication", value: p.target.CredentialKind, options: []string{store.CredentialPrivateKey, store.CredentialPassword, store.CredentialAgent}}}}
+		m.form = &adminForm{kind: "target_credential", title: "Replace credential", fields: []formField{{label: "Authentication", value: p.target.CredentialKind, options: credentialKinds()}}}
+		m.syncTargetKeyField()
 		m.mode = "form"
 	case "target_host_key":
 		p.kind = "host_key"
@@ -547,9 +582,11 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 	case "target_toggle":
 		enabled := !p.target.Enabled
 		return m.mutate("targets", "Target updated.", "admin.target."+enabledWord(enabled), map[string]any{"target": p.target.Name}, func() error { return m.store.SetTargetEnabled(m.ctx, p.target.Name, enabled) })
-	case "target_delete", "user_delete", "group_delete", "grant_delete":
+	case "target_delete", "user_delete", "group_delete", "grant_delete", "identity_delete":
 		p.kind = code
 		m.mode = "confirm_delete"
+	case "identity_view":
+		m.mode = "identity_public"
 	case "user_key_add":
 		m.mode, m.input = "public_key", ""
 		m.status = "Paste an OpenSSH public key, then press Enter."
@@ -655,7 +692,14 @@ func (m *Model) handleFormKey(key string) tea.Cmd {
 }
 
 func (m *Model) syncFormOptions() {
-	if m.form == nil || m.form.kind != "grant_add" || len(m.form.fields) < 3 {
+	if m.form == nil {
+		return
+	}
+	if m.form.kind == "target_add" || m.form.kind == "target_credential" {
+		m.syncTargetKeyField()
+		return
+	}
+	if m.form.kind != "grant_add" || len(m.form.fields) < 3 {
 		return
 	}
 	principal := &m.form.fields[2]
@@ -669,11 +713,54 @@ func (m *Model) syncFormOptions() {
 	}
 }
 
+func (m *Model) syncTargetKeyField() {
+	if m.form == nil {
+		return
+	}
+	authIndex := 0
+	baseFields := 1
+	if m.form.kind == "target_add" {
+		authIndex = 4
+		baseFields = 5
+	} else if m.form.kind != "target_credential" {
+		return
+	}
+	if len(m.form.fields) < baseFields {
+		return
+	}
+	storedKey := m.form.fields[authIndex].value == store.CredentialStoredKey
+	if storedKey && len(m.form.fields) == baseFields {
+		m.form.fields = append(m.form.fields, formField{label: "Saved SSH key", value: selectedIdentityName(m.identities, m.pendingIdentityID()), options: identityNames(m.identities)})
+	} else if !storedKey && len(m.form.fields) > baseFields {
+		m.form.fields = m.form.fields[:baseFields]
+		if m.form.index >= baseFields {
+			m.form.index = baseFields - 1
+		}
+	}
+}
+
+func (m *Model) pendingIdentityID() *int64 {
+	if m.pending == nil || m.form == nil || m.form.kind != "target_credential" {
+		return nil
+	}
+	return m.pending.target.IdentityID
+}
+
 func (m *Model) submitForm() tea.Cmd {
 	f := m.form
 	values := make([]string, len(f.fields))
+	authentication := ""
+	for _, field := range f.fields {
+		if field.label == "Authentication" {
+			authentication = strings.TrimSpace(field.value)
+			break
+		}
+	}
 	for i := range f.fields {
 		values[i] = strings.TrimSpace(f.fields[i].value)
+		if f.fields[i].label == "Saved SSH key" && authentication != store.CredentialStoredKey {
+			continue
+		}
 		if values[i] == "" {
 			m.status = f.fields[i].label + " is required."
 			f.index = i
@@ -681,6 +768,25 @@ func (m *Model) submitForm() tea.Cmd {
 		}
 	}
 	switch f.kind {
+	case "identity_add":
+		m.pending = &pendingOperation{kind: "identity_add", name: values[0]}
+		m.form = nil
+		if values[1] == "generate_ed25519" {
+			_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				m.closeModal("Key generation failed: " + err.Error())
+				return nil
+			}
+			block, err := gossh.MarshalPrivateKey(privateKey, "SSHGateW generated key: "+values[0])
+			if err != nil {
+				m.closeModal("Key generation failed: " + err.Error())
+				return nil
+			}
+			return m.finishIdentity(pem.EncodeToMemory(block))
+		}
+		m.mode, m.input = "secret_key", ""
+		m.status = "Paste the private key, then press Ctrl+D."
+		return nil
 	case "user_add":
 		return m.mutate("users", "User added.", "admin.user.add", map[string]any{"username": values[0], "role": values[1]}, func() error { _, err := m.store.AddUser(m.ctx, values[0], values[1]); return err })
 	case "group_add":
@@ -698,7 +804,15 @@ func (m *Model) submitForm() tea.Cmd {
 	case "target_credential":
 		m.pending.kind, m.pending.credentialKind = "credential", values[0]
 		m.form = nil
-		if values[0] == store.CredentialPassword {
+		if values[0] == store.CredentialStoredKey {
+			identity, err := m.store.SSHIdentityByName(m.ctx, values[1])
+			if err != nil {
+				m.closeModal("Saved SSH key unavailable: " + err.Error())
+				return nil
+			}
+			p := m.pending
+			return m.mutate("targets", "Credential replaced with saved SSH key.", "admin.target.credential.replace", map[string]any{"target": p.target.Name, "credential_kind": values[0], "ssh_key": identity.Name, "fingerprint": identity.Fingerprint}, func() error { return m.store.SetTargetIdentity(m.ctx, p.target.ID, identity.ID) })
+		} else if values[0] == store.CredentialPassword {
 			m.mode, m.input = "secret_password", ""
 			m.status = "Enter the downstream password, then press Enter."
 		} else if values[0] == store.CredentialPrivateKey {
@@ -716,6 +830,18 @@ func (m *Model) submitForm() tea.Cmd {
 			return nil
 		}
 		m.pending = &pendingOperation{kind: "target_add", name: values[0], host: values[1], port: port, remote: values[3], credentialKind: values[4]}
+		if values[4] == store.CredentialStoredKey {
+			if values[5] == "" {
+				m.status, f.index = "Create an SSH key first, then select it here.", 5
+				return nil
+			}
+			identity, err := m.store.SSHIdentityByName(m.ctx, values[5])
+			if err != nil {
+				m.status, f.index = "Saved SSH key unavailable: "+err.Error(), 5
+				return nil
+			}
+			m.pending.identity, m.pending.identityID = identity, identity.ID
+		}
 		m.form = nil
 		return m.scanHost(net.JoinHostPort(values[1], values[2]))
 	}
@@ -762,6 +888,8 @@ func (m *Model) finishDelete() tea.Cmd {
 	case "grant_delete":
 		g := p.grant
 		return m.mutate("grants", "Access removed.", "admin.grant.remove", map[string]any{"target": g.Target, "kind": g.Kind, "principal": g.Principal}, func() error { return m.store.SetGrant(m.ctx, g.Target, g.Kind, g.Principal, false) })
+	case "identity_delete":
+		return m.mutate("keys", "SSH key deleted.", "admin.ssh_identity.delete", map[string]any{"ssh_key": p.identity.Name, "fingerprint": p.identity.Fingerprint}, func() error { return m.store.DeleteSSHIdentity(m.ctx, p.identity.Name) })
 	}
 	return nil
 }
@@ -805,6 +933,32 @@ func groupNames(values []store.Group) []string {
 		out[i] = values[i].Name
 	}
 	return out
+}
+func identityNames(values []store.SSHIdentity) []string {
+	out := make([]string, len(values))
+	for i := range values {
+		out[i] = values[i].Name
+	}
+	return out
+}
+func firstIdentity(values []store.SSHIdentity) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0].Name
+}
+func selectedIdentityName(values []store.SSHIdentity, selected *int64) string {
+	if selected != nil {
+		for _, identity := range values {
+			if identity.ID == *selected {
+				return identity.Name
+			}
+		}
+	}
+	return firstIdentity(values)
+}
+func credentialKinds() []string {
+	return []string{store.CredentialPrivateKey, store.CredentialPassword, store.CredentialStoredKey, store.CredentialAgent}
 }
 func firstUser(values []store.User) string {
 	if len(values) == 0 {
@@ -1072,6 +1226,61 @@ func (m *Model) finishHostKey() tea.Cmd {
 		return mutationMsg{status: "Host key replaced.", err: e}
 	}
 }
+func (m *Model) finishIdentity(privateKey []byte) tea.Cmd {
+	return m.finishIdentityPayload(privateKey, "")
+}
+func (m *Model) finishIdentityWithPassphrase(privateKey []byte, passphrase string) tea.Cmd {
+	return m.finishIdentityPayload(privateKey, passphrase)
+}
+func (m *Model) finishIdentityPayload(privateKey []byte, passphrase string) tea.Cmd {
+	p := m.pending
+	var signer gossh.Signer
+	var err error
+	if passphrase == "" {
+		signer, err = gossh.ParsePrivateKey(privateKey)
+	} else {
+		signer, err = gossh.ParsePrivateKeyWithPassphrase(privateKey, []byte(passphrase))
+	}
+	if err != nil {
+		m.status = "Invalid private key: " + err.Error()
+		return nil
+	}
+	publicKey := strings.TrimSpace(string(gossh.MarshalAuthorizedKey(signer.PublicKey())))
+	fingerprint := gossh.FingerprintSHA256(signer.PublicKey())
+	payload := secrets.Payload{PrivateKey: privateKey, Passphrase: passphrase}
+	m.input = ""
+	m.mode = "saving"
+	return func() tea.Msg {
+		if m.cipher == nil {
+			return mutationMsg{err: errors.New("credential cipher unavailable")}
+		}
+		identity, e := m.store.AddSSHIdentity(m.ctx, p.name, publicKey, fingerprint)
+		if e != nil {
+			return mutationMsg{err: e}
+		}
+		nonce, ciphertext, e := m.cipher.EncryptSSHIdentity(identity.ID, payload)
+		if e == nil {
+			e = m.store.SetSSHIdentitySecret(m.ctx, identity.ID, nonce, ciphertext)
+		}
+		if e != nil {
+			_ = m.store.DeleteSSHIdentity(m.ctx, identity.Name)
+			return mutationMsg{err: e}
+		}
+		e = m.audit("admin.ssh_identity.add", map[string]any{"ssh_key": identity.Name, "fingerprint": fingerprint})
+		return mutationMsg{status: "SSH key stored.", section: "keys", err: e}
+	}
+}
+func (m *Model) finishStoredTarget() tea.Cmd {
+	p := m.pending
+	return func() tea.Msg {
+		identityID := p.identityID
+		t, err := m.store.AddTarget(m.ctx, store.NewTarget{Name: p.name, Host: p.host, Port: p.port, RemoteUsername: p.remote, CredentialKind: store.CredentialStoredKey, IdentityID: &identityID, HostKeyAlgorithm: p.hostKey.Type(), HostPublicKey: strings.TrimSpace(string(gossh.MarshalAuthorizedKey(p.hostKey)))})
+		if err == nil {
+			err = m.audit("admin.target.add", map[string]any{"target": t.Name, "credential_kind": store.CredentialStoredKey, "ssh_key": p.identity.Name, "fingerprint": p.identity.Fingerprint, "host_key": gossh.FingerprintSHA256(p.hostKey)})
+		}
+		return mutationMsg{status: "Target added with saved SSH key.", section: "targets", err: err}
+	}
+}
 func (m *Model) finishCredential(payload secrets.Payload) tea.Cmd {
 	p := m.pending
 	input := m.input
@@ -1127,6 +1336,8 @@ func (m *Model) filtered() []store.Target {
 }
 func (m *Model) itemCount() int {
 	switch m.section {
+	case "keys":
+		return len(m.identities)
 	case "users":
 		return len(m.users)
 	case "groups":
@@ -1161,7 +1372,7 @@ func (m *Model) pageSize() int {
 	return h - 8
 }
 func (m *Model) changeSection(delta int) {
-	sections := []string{"targets", "users", "groups", "grants", "audit"}
+	sections := []string{"targets", "keys", "users", "groups", "grants", "audit"}
 	current := 0
 	for i, section := range sections {
 		if section == m.section {
@@ -1271,7 +1482,7 @@ func (m *Model) tabLine(w int) string {
 	if m.user.Role != store.RoleAdmin {
 		return fit("  CONNECTION PROFILES", w)
 	}
-	sections := []struct{ key, name string }{{"1", "targets"}, {"2", "users"}, {"3", "groups"}, {"4", "grants"}, {"5", "audit"}}
+	sections := []struct{ key, name string }{{"1", "targets"}, {"2", "keys"}, {"3", "users"}, {"4", "groups"}, {"5", "grants"}, {"6", "audit"}}
 	parts := make([]string, 0, len(sections))
 	for _, s := range sections {
 		name := strings.ToUpper(s.name)
@@ -1281,7 +1492,7 @@ func (m *Model) tabLine(w int) string {
 			parts = append(parts, dim+"["+s.key+"] "+name+reset)
 		}
 	}
-	return fit("  "+strings.Join(parts, "   "), w)
+	return fit(" "+strings.Join(parts, "  "), w)
 }
 
 func (m *Model) content(inner int) (string, string, []string) {
@@ -1290,6 +1501,22 @@ func (m *Model) content(inner int) (string, string, []string) {
 	}
 	var rows []string
 	switch m.section {
+	case "keys":
+		for _, identity := range m.identities {
+			algorithm := strings.Fields(identity.PublicKey)
+			keyType := "SSH"
+			if len(algorithm) > 0 {
+				keyType = strings.TrimPrefix(strings.ToUpper(algorithm[0]), "SSH-")
+			}
+			uses := 0
+			for _, target := range m.targets {
+				if target.IdentityID != nil && *target.IdentityID == identity.ID {
+					uses++
+				}
+			}
+			rows = append(rows, fmt.Sprintf("  %-20s  %-11s  %d target(s)  %s", identity.Name, keyType, uses, identity.Fingerprint))
+		}
+		return "SSH keys", dim + "  Encrypted reusable downstream identities" + reset, rows
 	case "users":
 		for _, u := range m.users {
 			state := "ENABLED"
@@ -1345,7 +1572,7 @@ func (m *Model) content(inner int) (string, string, []string) {
 func (m *Model) modalContent(inner int) (string, string, []string) {
 	switch m.mode {
 	case "help":
-		return "Keyboard help", "  Press any key to return", []string{"  ↑/↓ or j/k     Move selection", "  Enter          Connect/manage selected item", "  a              Add item in current section", "  m              Manage selected item", "  Tab            Move through form fields", "  ←/→            Change option or section", "  /              Search targets", "  1–5            Change admin section", "  r              Refresh data", "  q              Disconnect from SSHGateW"}
+		return "Keyboard help", "  Press any key to return", []string{"  ↑/↓ or j/k     Move selection", "  Enter          Connect/manage selected item", "  a              Add item in current section", "  m              Manage selected item", "  Tab            Move through form fields", "  ←/→            Change option or section", "  /              Search targets", "  1–6            Change admin section", "  r              Refresh data", "  q              Disconnect from SSHGateW"}
 	case "form":
 		if m.form == nil {
 			return "Form", "  Esc cancels", nil
@@ -1397,11 +1624,20 @@ func (m *Model) modalContent(inner int) (string, string, []string) {
 				name = "group " + m.pending.group
 			case "grant_delete":
 				name = "grant for " + m.pending.grant.Target
+			case "identity_delete":
+				name = "SSH key " + m.pending.identity.Name
 			}
 		}
 		return "Confirm removal", red + "  This change takes effect immediately" + reset, []string{"", "  Remove " + name + "?", "", red + "  y  Remove" + reset, dim + "  n  Keep it" + reset}
 	case "public_key":
 		return "Add SSH public key", "  Paste one OpenSSH public key", []string{"", fmt.Sprintf("  Public key captured: %d bytes", len(m.input)), "", green + "  Enter   Validate and save" + reset, dim + "  Ctrl+D  Also saves • Esc cancels" + reset}
+	case "identity_public":
+		if m.pending == nil {
+			return "SSH public key", "  Press any key to return", nil
+		}
+		rows := []string{"  Name         " + m.pending.identity.Name, "  Fingerprint  " + m.pending.identity.Fingerprint, "", "  Public key:"}
+		rows = append(rows, wrapText("  "+m.pending.identity.PublicKey, maxInt(inner-2, 16))...)
+		return "SSH public key", "  Safe to copy to the downstream server", rows
 	case "agent_key":
 		return "Forwarded-agent identity", "  This public key pins the only agent identity SSHGateW may use", []string{"", fmt.Sprintf("  Public key captured: %d bytes", len(m.input)), "", green + "  Enter   Validate and save" + reset, dim + "  No private key is stored • Connect with ssh -A" + reset}
 	case "confirm_host":
@@ -1453,6 +1689,8 @@ func (m *Model) footer() string {
 		switch m.section {
 		case "targets":
 			actions = "  Enter connect  •  a add  •  m manage  •  / search  •  ←→ tabs  •  ? help"
+		case "keys":
+			actions = "  Enter/m manage  •  a add or generate  •  ←→ tabs  •  ? help  •  q quit"
 		case "users", "groups":
 			actions = "  Enter/m manage  •  a add  •  ←→ tabs  •  ? help  •  q quit"
 		case "grants":
@@ -1506,6 +1744,19 @@ func tailFit(s string, width int) string {
 		r = r[1:]
 	}
 	return "…" + string(r)
+}
+func wrapText(s string, width int) []string {
+	if width < 1 {
+		return []string{s}
+	}
+	runes := []rune(s)
+	var lines []string
+	for len(runes) > 0 {
+		end := minInt(len(runes), width)
+		lines = append(lines, string(runes[:end]))
+		runes = runes[end:]
+	}
+	return lines
 }
 func joinSides(left, right string, width int) string {
 	space := width - ansi.StringWidth(left) - ansi.StringWidth(right)

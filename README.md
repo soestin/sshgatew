@@ -11,7 +11,7 @@ encrypted at rest.
 - Public-key authentication to the gateway on port 2222 by default.
 - Member and administrator terminal interfaces.
 - Per-user and per-group target grants.
-- Password, stored private-key, and restricted forwarded-agent authentication.
+- Password, reusable stored-key, per-target private-key, and restricted forwarded-agent authentication.
 - Exact downstream host-key pinning; changed keys are rejected.
 - XChaCha20-Poly1305 encrypted credentials with a separate master-key file.
 - SQLite persistence, metadata auditing, session limits, and JSON logs.
@@ -25,7 +25,46 @@ Go 1.26 or newer is required.
 make build VERSION=0.1.0
 ```
 
+## Install from one binary
+
+On a fresh systemd-based Linux server, download the release binary and run its
+interactive installer as root:
+
+```sh
+chmod +x sshgatew
+sudo ./sshgatew install
+```
+
+The wizard asks for the administrator username, listen address, and an OpenSSH
+public key (which may be pasted directly). It then:
+
+- creates the locked `sshgatew` service account;
+- installs the binary at `/usr/local/bin/sshgatew`;
+- creates `/etc/sshgatew` and `/var/lib/sshgatew` with protected ownership;
+- generates the master key and gateway host key;
+- initializes SQLite and the administrator identity;
+- installs, enables, and starts the hardened systemd service; and
+- prints the gateway fingerprint and connection command.
+
+For unattended provisioning:
+
+```sh
+sudo ./sshgatew install \
+  --admin admin \
+  --authorized-key /root/admin.pub \
+  --listen 0.0.0.0:2222 \
+  --yes
+```
+
+`--authorized-key` also accepts an inline OpenSSH public key. Use `--no-start`
+to enable the unit without starting it. The installer refuses to overwrite an
+existing configuration or database. Open TCP port 2222 in the host or provider
+firewall when required.
+
 ## Initialize a Linux server
+
+The following manual procedure remains available for custom layouts or systems
+without systemd.
 
 Create the service account and protected directories:
 
@@ -91,6 +130,14 @@ sudo -u sshgatew sshgatew grants add --target production --group operators
 For private-key authentication, use `--auth private_key --key-file PATH`.
 Encrypted OpenSSH private keys are supported and their passphrases are stored
 inside the encrypted credential payload.
+
+Administrators can also manage reusable keys entirely in the TUI. Open the
+`SSH KEYS` tab and press `a` to import an existing private key or generate a new
+Ed25519 key. Its public key and fingerprint remain viewable for installation on
+downstream servers, while the private key is encrypted with the gateway master
+key. Choose `stored_key` while adding a target or replacing its credential to
+select one of these saved keys. A saved key cannot be deleted while a target
+still uses it.
 
 For a FIDO/YubiKey or another local-agent identity, choose `forwarded_agent`
 in the TUI or use `--auth forwarded_agent --key-file PUBLIC_KEY`. Connect to

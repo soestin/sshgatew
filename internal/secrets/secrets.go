@@ -70,7 +70,27 @@ func aad(targetID int64, kind string) []byte {
 	return []byte(fmt.Sprintf("sshgatew:credential:v1:%d:%s", targetID, kind))
 }
 
+func identityAAD(identityID int64) []byte {
+	return []byte(fmt.Sprintf("sshgatew:ssh-identity:v1:%d", identityID))
+}
+
 func (c *Cipher) Encrypt(targetID int64, kind string, p Payload) ([]byte, []byte, error) {
+	return c.encrypt(p, aad(targetID, kind))
+}
+
+func (c *Cipher) Decrypt(targetID int64, kind string, nonce, ciphertext []byte) (Payload, error) {
+	return c.decrypt(nonce, ciphertext, aad(targetID, kind))
+}
+
+func (c *Cipher) EncryptSSHIdentity(identityID int64, p Payload) ([]byte, []byte, error) {
+	return c.encrypt(p, identityAAD(identityID))
+}
+
+func (c *Cipher) DecryptSSHIdentity(identityID int64, nonce, ciphertext []byte) (Payload, error) {
+	return c.decrypt(nonce, ciphertext, identityAAD(identityID))
+}
+
+func (c *Cipher) encrypt(p Payload, associatedData []byte) ([]byte, []byte, error) {
 	p.Version = 1
 	plain, err := json.Marshal(p)
 	if err != nil {
@@ -85,15 +105,15 @@ func (c *Cipher) Encrypt(targetID int64, kind string, p Payload) ([]byte, []byte
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, nil, err
 	}
-	return nonce, aead.Seal(nil, nonce, plain, aad(targetID, kind)), nil
+	return nonce, aead.Seal(nil, nonce, plain, associatedData), nil
 }
 
-func (c *Cipher) Decrypt(targetID int64, kind string, nonce, ciphertext []byte) (Payload, error) {
+func (c *Cipher) decrypt(nonce, ciphertext, associatedData []byte) (Payload, error) {
 	aead, err := chacha20poly1305.NewX(c.key[:])
 	if err != nil {
 		return Payload{}, err
 	}
-	plain, err := aead.Open(nil, nonce, ciphertext, aad(targetID, kind))
+	plain, err := aead.Open(nil, nonce, ciphertext, associatedData)
 	if err != nil {
 		return Payload{}, errors.New("credential authentication failed")
 	}

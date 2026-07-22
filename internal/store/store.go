@@ -115,10 +115,18 @@ INSERT OR IGNORE INTO schema_migrations(version) VALUES(1);`
 	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version=2").Scan(&migrated); err != nil {
 		return err
 	}
-	if migrated != 0 {
-		return nil
+	if migrated == 0 {
+		if err := s.migrateTargetsV2(); err != nil {
+			return err
+		}
 	}
-	return s.migrateTargetsV2()
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version=3").Scan(&migrated); err != nil {
+		return err
+	}
+	if migrated == 0 {
+		return s.migrateIdentitiesV3()
+	}
+	return nil
 }
 
 func (s *Store) migrateTargetsV2() error {
@@ -162,6 +170,58 @@ INSERT INTO schema_migrations(version) VALUES(2);`
 	}
 	if violations != "" {
 		return fmt.Errorf("foreign key check failed after migration: %s", violations)
+	}
+	return nil
+}
+
+func (s *Store) migrateIdentitiesV3() error {
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+		return err
+	}
+	defer conn.ExecContext(ctx, "PRAGMA foreign_keys=ON")
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	const migration = `
+CREATE TABLE ssh_identities(
+ id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE BINARY,
+ public_key TEXT NOT NULL, fingerprint TEXT NOT NULL UNIQUE,
+ credential_nonce BLOB, credential_ciphertext BLOB,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE targets_v3(
+ id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE BINARY, host TEXT NOT NULL,
+ port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535), remote_username TEXT NOT NULL,
+ credential_kind TEXT NOT NULL CHECK(credential_kind IN ('password','private_key','forwarded_agent','stored_key')),
+ credential_nonce BLOB, credential_ciphertext BLOB,
+ host_key_algorithm TEXT NOT NULL, host_public_key TEXT NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ identity_id INTEGER REFERENCES ssh_identities(id) ON DELETE RESTRICT);
+INSERT INTO targets_v3(id,name,host,port,remote_username,credential_kind,credential_nonce,credential_ciphertext,host_key_algorithm,host_public_key,enabled,created_at,updated_at)
+ SELECT id,name,host,port,remote_username,credential_kind,credential_nonce,credential_ciphertext,host_key_algorithm,host_public_key,enabled,created_at,updated_at FROM targets;
+DROP TABLE targets;
+ALTER TABLE targets_v3 RENAME TO targets;
+INSERT INTO schema_migrations(version) VALUES(3);`
+	if _, err = tx.ExecContext(ctx, migration); err != nil {
+		return fmt.Errorf("migrate reusable SSH identities: %w", err)
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	var violations string
+	if err = conn.QueryRowContext(ctx, `SELECT coalesce(group_concat("table" || ':' || rowid), '') FROM pragma_foreign_key_check`).Scan(&violations); err != nil {
+		return err
+	}
+	if violations != "" {
+		return fmt.Errorf("foreign key check failed after identity migration: %s", violations)
 	}
 	return nil
 }
@@ -395,10 +455,79 @@ func (s *Store) ListGroupMembers(ctx context.Context) ([]GroupMember, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) AddSSHIdentity(ctx context.Context, name, publicKey, fingerprint string) (SSHIdentity, error) {
+	name, err := validateName(name, "SSH key name")
+	if err != nil {
+		return SSHIdentity{}, err
+	}
+	if strings.TrimSpace(publicKey) == "" || strings.TrimSpace(fingerprint) == "" {
+		return SSHIdentity{}, errors.New("SSH identity public key and fingerprint are required")
+	}
+	result, err := s.db.ExecContext(ctx, "INSERT INTO ssh_identities(name,public_key,fingerprint) VALUES(?,?,?)", name, publicKey, fingerprint)
+	if err != nil {
+		return SSHIdentity{}, err
+	}
+	id, _ := result.LastInsertId()
+	return s.SSHIdentityByID(ctx, id)
+}
+
+func (s *Store) SetSSHIdentitySecret(ctx context.Context, id int64, nonce, ciphertext []byte) error {
+	result, err := s.db.ExecContext(ctx, "UPDATE ssh_identities SET credential_nonce=?,credential_ciphertext=? WHERE id=?", nonce, ciphertext, id)
+	return changed(result, err)
+}
+
+func (s *Store) SSHIdentityByID(ctx context.Context, id int64) (SSHIdentity, error) {
+	return scanSSHIdentity(s.db.QueryRowContext(ctx, "SELECT id,name,public_key,fingerprint,credential_nonce,credential_ciphertext,created_at FROM ssh_identities WHERE id=?", id))
+}
+
+func (s *Store) SSHIdentityByName(ctx context.Context, name string) (SSHIdentity, error) {
+	return scanSSHIdentity(s.db.QueryRowContext(ctx, "SELECT id,name,public_key,fingerprint,credential_nonce,credential_ciphertext,created_at FROM ssh_identities WHERE name=?", strings.ToLower(name)))
+}
+
+func scanSSHIdentity(row *sql.Row) (SSHIdentity, error) {
+	var identity SSHIdentity
+	var created string
+	err := row.Scan(&identity.ID, &identity.Name, &identity.PublicKey, &identity.Fingerprint, &identity.Nonce, &identity.Ciphertext, &created)
+	identity.CreatedAt = parseTime(created)
+	return identity, err
+}
+
+func (s *Store) ListSSHIdentities(ctx context.Context) ([]SSHIdentity, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT id,name,public_key,fingerprint,credential_nonce,credential_ciphertext,created_at FROM ssh_identities ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var identities []SSHIdentity
+	for rows.Next() {
+		var identity SSHIdentity
+		var created string
+		if err = rows.Scan(&identity.ID, &identity.Name, &identity.PublicKey, &identity.Fingerprint, &identity.Nonce, &identity.Ciphertext, &created); err != nil {
+			return nil, err
+		}
+		identity.CreatedAt = parseTime(created)
+		identities = append(identities, identity)
+	}
+	return identities, rows.Err()
+}
+
+func (s *Store) DeleteSSHIdentity(ctx context.Context, name string) error {
+	var uses int
+	if err := s.db.QueryRowContext(ctx, "SELECT count(*) FROM targets WHERE identity_id=(SELECT id FROM ssh_identities WHERE name=?)", strings.ToLower(name)).Scan(&uses); err != nil {
+		return err
+	}
+	if uses > 0 {
+		return errors.New("SSH key is still selected by one or more targets")
+	}
+	result, err := s.db.ExecContext(ctx, "DELETE FROM ssh_identities WHERE name=?", strings.ToLower(name))
+	return changed(result, err)
+}
+
 type NewTarget struct {
 	Name, Host                                                      string
 	Port                                                            int
 	RemoteUsername, CredentialKind, HostKeyAlgorithm, HostPublicKey string
+	IdentityID                                                      *int64
 }
 
 func (s *Store) AddTarget(ctx context.Context, n NewTarget) (Target, error) {
@@ -414,7 +543,10 @@ func (s *Store) AddTarget(ctx context.Context, n NewTarget) (Target, error) {
 	if n.HostKeyAlgorithm == "" || n.HostPublicKey == "" {
 		return Target{}, errors.New("pinned host key is required")
 	}
-	r, err := s.db.ExecContext(ctx, `INSERT INTO targets(name,host,port,remote_username,credential_kind,host_key_algorithm,host_public_key) VALUES(?,?,?,?,?,?,?)`, n.Name, n.Host, n.Port, n.RemoteUsername, n.CredentialKind, n.HostKeyAlgorithm, n.HostPublicKey)
+	if n.CredentialKind == CredentialStoredKey && n.IdentityID == nil {
+		return Target{}, errors.New("stored_key authentication requires an SSH identity")
+	}
+	r, err := s.db.ExecContext(ctx, `INSERT INTO targets(name,host,port,remote_username,credential_kind,host_key_algorithm,host_public_key,identity_id) VALUES(?,?,?,?,?,?,?,?)`, n.Name, n.Host, n.Port, n.RemoteUsername, n.CredentialKind, n.HostKeyAlgorithm, n.HostPublicKey, n.IdentityID)
 	if err != nil {
 		return Target{}, err
 	}
@@ -422,7 +554,7 @@ func (s *Store) AddTarget(ctx context.Context, n NewTarget) (Target, error) {
 	return s.TargetByID(ctx, id)
 }
 func targetCols() string {
-	return "id,name,host,port,remote_username,credential_kind,enabled,host_key_algorithm,host_public_key,credential_nonce,credential_ciphertext,created_at,updated_at"
+	return "id,name,host,port,remote_username,credential_kind,enabled,host_key_algorithm,host_public_key,credential_nonce,credential_ciphertext,created_at,updated_at,identity_id"
 }
 
 type scanner interface{ Scan(...any) error }
@@ -430,7 +562,7 @@ type scanner interface{ Scan(...any) error }
 func scanTarget(r scanner) (Target, error) {
 	var t Target
 	var ca, ua string
-	err := r.Scan(&t.ID, &t.Name, &t.Host, &t.Port, &t.RemoteUsername, &t.CredentialKind, &t.Enabled, &t.HostKeyAlgorithm, &t.HostPublicKey, &t.Nonce, &t.Ciphertext, &ca, &ua)
+	err := r.Scan(&t.ID, &t.Name, &t.Host, &t.Port, &t.RemoteUsername, &t.CredentialKind, &t.Enabled, &t.HostKeyAlgorithm, &t.HostPublicKey, &t.Nonce, &t.Ciphertext, &ca, &ua, &t.IdentityID)
 	t.CreatedAt = parseTime(ca)
 	t.UpdatedAt = parseTime(ua)
 	return t, err
@@ -482,19 +614,27 @@ func (s *Store) DeleteTarget(ctx context.Context, name string) error {
 	return changed(r, err)
 }
 func (s *Store) SetTargetCredential(ctx context.Context, id int64, nonce, ciphertext []byte) error {
-	r, err := s.db.ExecContext(ctx, "UPDATE targets SET credential_nonce=?,credential_ciphertext=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", nonce, ciphertext, id)
+	r, err := s.db.ExecContext(ctx, "UPDATE targets SET credential_nonce=?,credential_ciphertext=?,identity_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?", nonce, ciphertext, id)
 	return changed(r, err)
 }
 func (s *Store) SetTargetCredentialKind(ctx context.Context, id int64, kind string, nonce, ciphertext []byte) error {
 	if !validCredentialKind(kind) {
 		return errors.New("invalid credential kind")
 	}
-	r, err := s.db.ExecContext(ctx, "UPDATE targets SET credential_kind=?,credential_nonce=?,credential_ciphertext=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", kind, nonce, ciphertext, id)
+	if kind == CredentialStoredKey {
+		return errors.New("use SetTargetIdentity for stored_key authentication")
+	}
+	r, err := s.db.ExecContext(ctx, "UPDATE targets SET credential_kind=?,credential_nonce=?,credential_ciphertext=?,identity_id=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?", kind, nonce, ciphertext, id)
+	return changed(r, err)
+}
+
+func (s *Store) SetTargetIdentity(ctx context.Context, targetID, identityID int64) error {
+	r, err := s.db.ExecContext(ctx, "UPDATE targets SET credential_kind=?,credential_nonce=NULL,credential_ciphertext=NULL,identity_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?", CredentialStoredKey, identityID, targetID)
 	return changed(r, err)
 }
 
 func validCredentialKind(kind string) bool {
-	return kind == CredentialPassword || kind == CredentialPrivateKey || kind == CredentialAgent
+	return kind == CredentialPassword || kind == CredentialPrivateKey || kind == CredentialAgent || kind == CredentialStoredKey
 }
 func (s *Store) SetTargetHostKey(ctx context.Context, name, algorithm, publicKey string) error {
 	r, err := s.db.ExecContext(ctx, "UPDATE targets SET host_key_algorithm=?,host_public_key=?,updated_at=CURRENT_TIMESTAMP WHERE name=?", algorithm, publicKey, name)

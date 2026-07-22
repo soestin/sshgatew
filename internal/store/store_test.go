@@ -59,8 +59,35 @@ INSERT INTO targets(name,host,port,remote_username,credential_kind,host_key_algo
 		t.Fatalf("forwarded-agent target rejected after migration: %v", err)
 	}
 	var version int
-	if err = store.DB().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 2 {
+	if err = store.DB().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 3 {
 		t.Fatalf("migration version=%d err=%v", version, err)
+	}
+}
+func TestReusableSSHIdentityTargetAndDeletionSafety(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	identity, err := s.AddSSHIdentity(ctx, "deploy-key", "ssh-ed25519 AAAA", "SHA256:deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetSSHIdentitySecret(ctx, identity.ID, []byte("nonce"), []byte("ciphertext")); err != nil {
+		t.Fatal(err)
+	}
+	target, err := s.AddTarget(ctx, NewTarget{Name: "stored", Host: "127.0.0.1", Port: 22, RemoteUsername: "root", CredentialKind: CredentialStoredKey, IdentityID: &identity.ID, HostKeyAlgorithm: "ssh-ed25519", HostPublicKey: "ssh-ed25519 AAAA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.IdentityID == nil || *target.IdentityID != identity.ID || target.CredentialKind != CredentialStoredKey {
+		t.Fatalf("stored-key target=%#v", target)
+	}
+	if err = s.DeleteSSHIdentity(ctx, identity.Name); err == nil {
+		t.Fatal("deleted an SSH key that is still selected by a target")
+	}
+	if err = s.DeleteTarget(ctx, target.Name); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.DeleteSSHIdentity(ctx, identity.Name); err != nil {
+		t.Fatal(err)
 	}
 }
 func TestAuthorizationAndAdminInvariant(t *testing.T) {

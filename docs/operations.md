@@ -1,5 +1,25 @@
 # Operator guide
 
+## Single-binary bootstrap
+
+On a fresh systemd Linux host:
+
+```sh
+chmod +x sshgatew
+sudo ./sshgatew install
+```
+
+The interactive installer performs the complete service-account, directory,
+key, database, configuration, binary, and systemd setup. It does not change the
+host firewall. For automation, pass `--admin`, `--authorized-key`, `--listen`,
+and `--yes`; add `--no-start` when configuration management will start the
+service later.
+
+Installation is intentionally fail-closed when `/etc/sshgatew/config.toml` or
+`/var/lib/sshgatew/sshgatew.db` already exists. Existing installations should
+be upgraded by replacing the binary and restarting the service, not by running
+the bootstrap installer again.
+
 All commands accept `--config PATH` before the subcommand. The default is
 `/etc/sshgatew/config.toml`.
 
@@ -73,21 +93,29 @@ with an actionable error.
 
 ## Remote administrator TUI
 
-Administrators can browse targets, users, groups, grants, and recent audit
-events. The interface adapts to the SSH terminal size and paginates long lists.
+Administrators can browse targets, reusable SSH keys, users, groups, grants,
+and recent audit events. The interface adapts to the SSH terminal size and paginates long lists.
 Resize events redraw it in place without disconnecting the session.
 
 Use Up/Down or `j`/`k` to select, PgUp/PgDn to change pages, Home/End to jump,
-Enter to connect, `/` to search, `1`–`5` or Left/Right to change administrator
+Enter to connect, `/` to search, `1`–`6` or Left/Right to change administrator
 sections, `?` for help, and `q` to leave. Administrators perform changes through
 contextual menus—no command syntax is required. Press `a` to add an item in the
 current section. Press Enter or `m` to manage the selected user, group, grant,
 or target. Tab moves through form fields and Left/Right changes a choice.
 
 The menus cover target connection settings, credentials, pinned host keys,
-enabled state and deletion; user roles, enabled state and SSH keys; group
-membership; and user/group target grants. Destructive actions require an
-explicit confirmation.
+enabled state and deletion; reusable downstream SSH keys; user roles, enabled
+state and gateway login keys; group membership; and user/group target grants.
+Destructive actions require an explicit confirmation.
+
+The `SSH KEYS` tab stores reusable downstream identities. Press `a`, give the
+key a name, then choose either `generate_ed25519` or `import_private_key`.
+Generated keys expose their public half through the Manage menu so it can be
+copied into a downstream `authorized_keys` file. Imported encrypted OpenSSH
+keys are supported and their passphrase remains inside the encrypted payload.
+When adding a target or replacing its credential, choose `stored_key` and then
+select the saved key by name. Keys referenced by targets cannot be deleted.
 
 Target addition and host-key replacement scan the server, display the observed
 fingerprint, and require `y` confirmation. Passwords and private keys use a

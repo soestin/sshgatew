@@ -231,6 +231,66 @@ func TestSecurityKeyPublicIdentityIsAcceptedForForwardedAgent(t *testing.T) {
 	}
 }
 
+func TestGenerateReusableSSHKeyAndSelectItForTarget(t *testing.T) {
+	m, st := testModel(t)
+	m.section = "keys"
+	m.openAddForm()
+	m.form.fields[0].value = "production"
+	m.form.fields[1].value = "generate_ed25519"
+	applyCommand(m, m.submitForm())
+
+	identities, err := st.ListSSHIdentities(context.Background())
+	if err != nil || len(identities) != 1 {
+		t.Fatalf("identities=%#v err=%v", identities, err)
+	}
+	identity := identities[0]
+	payload, err := m.cipher.DecryptSSHIdentity(identity.ID, identity.Nonce, identity.Ciphertext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := gossh.ParsePrivateKey(payload.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gossh.FingerprintSHA256(signer.PublicKey()) != identity.Fingerprint {
+		t.Fatal("generated private key does not match stored public key")
+	}
+
+	applyMessage(m, reloadMsg{})
+	m.section = "targets"
+	m.openAddForm()
+	if len(m.form.fields) != 5 {
+		t.Fatalf("saved key shown for private-key authentication: %#v", m.form.fields)
+	}
+	m.form.fields[4].value = store.CredentialStoredKey
+	m.syncFormOptions()
+	if got := m.form.fields[5].value; got != identity.Name {
+		t.Fatalf("saved key was not selected in target form: %q", got)
+	}
+	m.form.fields[4].value = store.CredentialPassword
+	m.syncFormOptions()
+	if len(m.form.fields) != 5 {
+		t.Fatalf("saved key remained visible for password authentication: %#v", m.form.fields)
+	}
+	_, hostPrivate, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostKey, err := gossh.NewPublicKey(hostPrivate.Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.pending = &pendingOperation{kind: "target_add", name: "production-host", host: "127.0.0.1", port: 22, remote: "root", credentialKind: store.CredentialStoredKey, identity: identity, identityID: identity.ID, hostKey: hostKey}
+	applyCommand(m, m.finishStoredTarget())
+	target, err := st.TargetByName(context.Background(), "production-host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.IdentityID == nil || *target.IdentityID != identity.ID || len(target.Ciphertext) != 0 {
+		t.Fatalf("target did not reference reusable key cleanly: %#v", target)
+	}
+}
+
 func TestAdminMenusManageUsersGroupsKeysAndGrants(t *testing.T) {
 	m, st := testModel(t)
 	applyMessage(m, reloadMsg{})

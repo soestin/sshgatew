@@ -156,7 +156,20 @@ func (s *Server) handle(sess charmssh.Session) {
 		}
 		start := time.Now()
 		_ = s.store.Audit(sess.Context(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "target.connect.start", TargetID: &target.ID, Outcome: "success"})
-		credential, err := s.cipher.Decrypt(target.ID, target.CredentialKind, target.Nonce, target.Ciphertext)
+		var credential secrets.Payload
+		if target.CredentialKind == store.CredentialStoredKey {
+			if target.IdentityID == nil {
+				err = errors.New("stored SSH key reference is missing")
+			} else {
+				var identity store.SSHIdentity
+				identity, err = s.store.SSHIdentityByID(sess.Context(), *target.IdentityID)
+				if err == nil {
+					credential, err = s.cipher.DecryptSSHIdentity(identity.ID, identity.Nonce, identity.Ciphertext)
+				}
+			}
+		} else {
+			credential, err = s.cipher.Decrypt(target.ID, target.CredentialKind, target.Nonce, target.Ciphertext)
+		}
 		var forwarded *downstream.AgentConnection
 		if err == nil && target.CredentialKind == store.CredentialAgent {
 			forwarded, err = downstream.OpenForwardedAgent(sess)

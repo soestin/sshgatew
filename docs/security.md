@@ -13,7 +13,8 @@ downstream credential it manages. Harden and monitor the host accordingly.
 - Downstream host public keys are pinned exactly. Unknown and changed keys fail
   before downstream authentication completes.
 - Credential payloads use XChaCha20-Poly1305 with random nonces and associated
-  data binding them to the target ID and credential type.
+  data binding them either to the target ID and credential type or to a reusable
+  SSH-key ID in a separate cryptographic namespace.
 - The 32-byte master key and Ed25519 gateway host key must be regular files with
   no group/world permission bits. The SQLite database is mode 0600.
 - Passwords, private keys, passphrases, terminal contents, and downstream

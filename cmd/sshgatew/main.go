@@ -58,6 +58,9 @@ func run(args []string, in io.Reader, out, errOut io.Writer) error {
 	if rest[0] == "init" {
 		return initCommand(*configPath, rest[1:], in, out, errOut)
 	}
+	if rest[0] == "install" {
+		return installCommand(*configPath, rest[1:], in, out, errOut)
+	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
@@ -77,6 +80,8 @@ func usage(w io.Writer) error {
 	fmt.Fprint(w, `SSHGateW - an authenticated SSH gateway
 
 Usage:
+  sudo ./sshgatew install
+  sudo ./sshgatew install --admin USER --authorized-key FILE --yes
   sshgatew [--config path] init --admin USER --authorized-key FILE [--data-dir DIR]
   sshgatew [--config path] serve
   sshgatew [--config path] users|groups|targets|grants|audit ...

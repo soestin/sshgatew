@@ -202,7 +202,7 @@ func authMethod(kind string, p secrets.Payload, forwarded *AgentConnection) (gos
 			return nil, errors.New("stored password is empty")
 		}
 		return gossh.Password(p.Password), nil
-	case store.CredentialPrivateKey:
+	case store.CredentialPrivateKey, store.CredentialStoredKey:
 		var signer gossh.Signer
 		var err error
 		if p.Passphrase != "" {
