@@ -141,9 +141,41 @@ INSERT OR IGNORE INTO schema_migrations(version) VALUES(1);`
 		return err
 	}
 	if migrated == 0 {
-		return s.migrateGatewayKeyUniquenessV5()
+		if err := s.migrateGatewayKeyUniquenessV5(); err != nil {
+			return err
+		}
+	}
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version=6").Scan(&migrated); err != nil {
+		return err
+	}
+	if migrated == 0 {
+		return s.migrateProtocolAccessV6()
 	}
 	return nil
+}
+
+func (s *Store) migrateProtocolAccessV6() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`ALTER TABLE user_target_grants ADD COLUMN allow_shell INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE user_target_grants ADD COLUMN allow_sftp INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE user_target_grants ADD COLUMN allow_scp INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE user_target_grants ADD COLUMN allow_tcp_forward INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE group_target_grants ADD COLUMN allow_shell INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE group_target_grants ADD COLUMN allow_sftp INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE group_target_grants ADD COLUMN allow_scp INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE group_target_grants ADD COLUMN allow_tcp_forward INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE target_forward_rules(
+ id INTEGER PRIMARY KEY, target_id INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+ host TEXT NOT NULL COLLATE BINARY, port INTEGER NOT NULL CHECK(port BETWEEN 1 AND 65535),
+ UNIQUE(target_id,host,port));
+INSERT INTO schema_migrations(version) VALUES(6);`); err != nil {
+		return fmt.Errorf("migrate protocol access: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) migrateGatewayKeyUniquenessV5() error {
@@ -747,6 +779,9 @@ func (s *Store) UpdateTarget(ctx context.Context, name, host string, port int, r
 }
 
 func (s *Store) SetGrant(ctx context.Context, target, kind, principal string, add bool) error {
+	return s.SetGrantCapabilities(ctx, target, kind, principal, add, true, true, true, false)
+}
+func (s *Store) SetGrantCapabilities(ctx context.Context, target, kind, principal string, add, shell, sftp, scp, tcpForward bool) error {
 	t, err := s.TargetByName(ctx, target)
 	if err != nil {
 		return err
@@ -771,14 +806,14 @@ func (s *Store) SetGrant(ctx context.Context, target, kind, principal string, ad
 		return errors.New("principal kind must be user or group")
 	}
 	if add {
-		_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO "+table+"("+col+",target_id) VALUES(?,?)", id, t.ID)
+		_, err = s.db.ExecContext(ctx, "INSERT INTO "+table+"("+col+",target_id,allow_shell,allow_sftp,allow_scp,allow_tcp_forward) VALUES(?,?,?,?,?,?) ON CONFLICT("+col+",target_id) DO UPDATE SET allow_shell=excluded.allow_shell,allow_sftp=excluded.allow_sftp,allow_scp=excluded.allow_scp,allow_tcp_forward=excluded.allow_tcp_forward", id, t.ID, shell, sftp, scp, tcpForward)
 	} else {
 		_, err = s.db.ExecContext(ctx, "DELETE FROM "+table+" WHERE "+col+"=? AND target_id=?", id, t.ID)
 	}
 	return err
 }
 func (s *Store) ListGrants(ctx context.Context) ([]Grant, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT t.name,'user',u.username FROM user_target_grants x JOIN users u ON u.id=x.user_id JOIN targets t ON t.id=x.target_id UNION ALL SELECT t.name,'group',g.name FROM group_target_grants x JOIN groups_table g ON g.id=x.group_id JOIN targets t ON t.id=x.target_id ORDER BY 1,2,3`)
+	rows, err := s.db.QueryContext(ctx, `SELECT t.name,'user',u.username,x.allow_shell,x.allow_sftp,x.allow_scp,x.allow_tcp_forward FROM user_target_grants x JOIN users u ON u.id=x.user_id JOIN targets t ON t.id=x.target_id UNION ALL SELECT t.name,'group',g.name,x.allow_shell,x.allow_sftp,x.allow_scp,x.allow_tcp_forward FROM group_target_grants x JOIN groups_table g ON g.id=x.group_id JOIN targets t ON t.id=x.target_id ORDER BY 1,2,3`)
 	if err != nil {
 		return nil, err
 	}
@@ -786,7 +821,7 @@ func (s *Store) ListGrants(ctx context.Context) ([]Grant, error) {
 	var out []Grant
 	for rows.Next() {
 		var g Grant
-		if err = rows.Scan(&g.Target, &g.Kind, &g.Principal); err != nil {
+		if err = rows.Scan(&g.Target, &g.Kind, &g.Principal, &g.Shell, &g.SFTP, &g.SCP, &g.TCPForward); err != nil {
 			return nil, err
 		}
 		out = append(out, g)
@@ -794,15 +829,59 @@ func (s *Store) ListGrants(ctx context.Context) ([]Grant, error) {
 	return out, rows.Err()
 }
 func (s *Store) CanAccess(ctx context.Context, u User, targetID int64) bool {
+	return s.CanAccessCapability(ctx, u, targetID, CapabilityShell)
+}
+func (s *Store) CanAccessCapability(ctx context.Context, u User, targetID int64, capability string) bool {
 	if !u.Enabled {
+		return false
+	}
+	column := map[string]string{CapabilityShell: "allow_shell", CapabilitySFTP: "allow_sftp", CapabilitySCP: "allow_scp", CapabilityForward: "allow_tcp_forward"}[capability]
+	if column == "" {
 		return false
 	}
 	var n int
 	if u.Role == RoleAdmin {
 		_ = s.db.QueryRowContext(ctx, "SELECT count(*) FROM targets WHERE id=? AND enabled=1", targetID).Scan(&n)
 	} else {
-		_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM targets t WHERE t.id=? AND t.enabled=1 AND (EXISTS(SELECT 1 FROM user_target_grants WHERE user_id=? AND target_id=t.id) OR EXISTS(SELECT 1 FROM group_members gm JOIN group_target_grants gg ON gg.group_id=gm.group_id WHERE gm.user_id=? AND gg.target_id=t.id))`, targetID, u.ID, u.ID).Scan(&n)
+		_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM targets t WHERE t.id=? AND t.enabled=1 AND (EXISTS(SELECT 1 FROM user_target_grants WHERE user_id=? AND target_id=t.id AND `+column+`=1) OR EXISTS(SELECT 1 FROM group_members gm JOIN group_target_grants gg ON gg.group_id=gm.group_id WHERE gm.user_id=? AND gg.target_id=t.id AND gg.`+column+`=1))`, targetID, u.ID, u.ID).Scan(&n)
 	}
+	return n > 0
+}
+
+func (s *Store) AddForwardRule(ctx context.Context, target, host string, port int) error {
+	if strings.TrimSpace(host) == "" || port < 1 || port > 65535 {
+		return errors.New("invalid forwarding destination")
+	}
+	t, err := s.TargetByName(ctx, target)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, "INSERT OR IGNORE INTO target_forward_rules(target_id,host,port) VALUES(?,?,?)", t.ID, strings.ToLower(strings.TrimSpace(host)), port)
+	return err
+}
+func (s *Store) DeleteForwardRule(ctx context.Context, id int64) error {
+	r, err := s.db.ExecContext(ctx, "DELETE FROM target_forward_rules WHERE id=?", id)
+	return changed(r, err)
+}
+func (s *Store) ListForwardRules(ctx context.Context) ([]ForwardRule, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT r.id,r.target_id,t.name,r.host,r.port FROM target_forward_rules r JOIN targets t ON t.id=r.target_id ORDER BY t.name,r.host,r.port`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ForwardRule
+	for rows.Next() {
+		var r ForwardRule
+		if err = rows.Scan(&r.ID, &r.TargetID, &r.Target, &r.Host, &r.Port); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+func (s *Store) ForwardAllowed(ctx context.Context, targetID int64, host string, port int) bool {
+	var n int
+	_ = s.db.QueryRowContext(ctx, "SELECT count(*) FROM target_forward_rules WHERE target_id=? AND host=? COLLATE NOCASE AND port=?", targetID, strings.TrimSpace(host), port).Scan(&n)
 	return n > 0
 }
 
