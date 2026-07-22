@@ -1905,7 +1905,7 @@ func (m *Model) footer() string {
 		case "grants":
 			actions = "  Enter/m manage  •  a grant access  •  ←→ tabs  •  ? help  •  q quit"
 		case "forwards":
-			actions = "  a allow destination  •  Enter/m remove  •  ←→ tabs  •  ? help  •  q quit"
+			actions = "  a allow destination  •  Enter/m manage  •  ←→ tabs  •  ? help  •  q quit"
 		default:
 			actions = "  ↑↓ navigate  •  ←→ tabs  •  r refresh  •  ? help  •  q quit"
 		}
