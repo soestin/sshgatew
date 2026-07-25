@@ -4,3 +4,4 @@
 *.db-wal
 *.test
 coverage.out
+.env

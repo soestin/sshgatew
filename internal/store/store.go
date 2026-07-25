@@ -149,9 +149,37 @@ INSERT OR IGNORE INTO schema_migrations(version) VALUES(1);`
 		return err
 	}
 	if migrated == 0 {
-		return s.migrateProtocolAccessV6()
+		if err := s.migrateProtocolAccessV6(); err != nil {
+			return err
+		}
+	}
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version=7").Scan(&migrated); err != nil {
+		return err
+	}
+	if migrated == 0 {
+		return s.migrateOIDCIdentitiesV7()
 	}
 	return nil
+}
+
+func (s *Store) migrateOIDCIdentitiesV7() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`CREATE TABLE oidc_identities(
+ id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+ issuer TEXT NOT NULL COLLATE BINARY, subject TEXT COLLATE BINARY,
+ provider_username TEXT NOT NULL COLLATE BINARY,
+ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ UNIQUE(user_id,issuer), UNIQUE(issuer,subject), UNIQUE(issuer,provider_username));
+CREATE INDEX oidc_identity_user_idx ON oidc_identities(user_id);
+INSERT INTO schema_migrations(version) VALUES(7);`); err != nil {
+		return fmt.Errorf("migrate OIDC identities: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) migrateProtocolAccessV6() error {
@@ -369,6 +397,190 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+func validateOIDCValue(value, kind string, limit int) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > limit {
+		return "", fmt.Errorf("%s must contain between 1 and %d bytes", kind, limit)
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("%s contains control characters", kind)
+		}
+	}
+	return value, nil
+}
+
+func normalizeOIDCValues(issuer, subject, providerUsername string) (string, string, string, error) {
+	issuer, err := validateOIDCValue(issuer, "OIDC issuer", 2048)
+	if err != nil {
+		return "", "", "", err
+	}
+	subject, err = validateOIDCValue(subject, "OIDC subject", 512)
+	if err != nil {
+		return "", "", "", err
+	}
+	providerUsername, err = validateOIDCValue(strings.ToLower(providerUsername), "OIDC username", 255)
+	return issuer, subject, providerUsername, err
+}
+
+func (s *Store) SetOIDCUsernameMapping(ctx context.Context, userID int64, issuer, providerUsername string) error {
+	var err error
+	issuer, err = validateOIDCValue(issuer, "OIDC issuer", 2048)
+	if err != nil {
+		return err
+	}
+	providerUsername, err = validateOIDCValue(strings.ToLower(providerUsername), "OIDC username", 255)
+	if err != nil {
+		return err
+	}
+	if _, err = s.UserByID(ctx, userID); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO oidc_identities(user_id,issuer,subject,provider_username)
+ VALUES(?,?,NULL,?) ON CONFLICT(user_id,issuer) DO UPDATE SET
+ subject=NULL,provider_username=excluded.provider_username,updated_at=CURRENT_TIMESTAMP`,
+		userID, issuer, providerUsername)
+	return err
+}
+
+func (s *Store) LinkOIDCIdentity(ctx context.Context, userID int64, issuer, subject, providerUsername string) error {
+	issuer, subject, providerUsername, err := normalizeOIDCValues(issuer, subject, providerUsername)
+	if err != nil {
+		return err
+	}
+	if _, err = s.UserByID(ctx, userID); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT user_id FROM oidc_identities
+ WHERE issuer=? AND (subject=? OR provider_username=?)`, issuer, subject, providerUsername)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var owner int64
+		if err = rows.Scan(&owner); err != nil {
+			rows.Close()
+			return err
+		}
+		if owner != userID {
+			rows.Close()
+			return errors.New("OIDC identity is already mapped to another user")
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO oidc_identities(user_id,issuer,subject,provider_username)
+ VALUES(?,?,?,?) ON CONFLICT(user_id,issuer) DO UPDATE SET
+ subject=excluded.subject,provider_username=excluded.provider_username,updated_at=CURRENT_TIMESTAMP`,
+		userID, issuer, subject, providerUsername); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) AuthenticateOIDC(ctx context.Context, claimedUsername, issuer, subject, providerUsername string) (User, error) {
+	issuer, subject, providerUsername, err := normalizeOIDCValues(issuer, subject, providerUsername)
+	if err != nil {
+		return User{}, err
+	}
+	claimedUsername = strings.ToLower(strings.TrimSpace(claimedUsername))
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, err
+	}
+	defer tx.Rollback()
+	var userID int64
+	err = tx.QueryRowContext(ctx, `SELECT user_id FROM oidc_identities WHERE issuer=? AND subject=?`,
+		issuer, subject).Scan(&userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = tx.QueryRowContext(ctx, `SELECT user_id FROM oidc_identities
+		 WHERE issuer=? AND provider_username=? AND subject IS NULL`,
+			issuer, providerUsername).Scan(&userID)
+		if err == nil {
+			_, err = tx.ExecContext(ctx, `UPDATE oidc_identities SET subject=?,updated_at=CURRENT_TIMESTAMP
+			 WHERE user_id=? AND issuer=? AND subject IS NULL`, subject, userID, issuer)
+		}
+	} else if err == nil {
+		_, err = tx.ExecContext(ctx, `UPDATE oidc_identities SET provider_username=?,updated_at=CURRENT_TIMESTAMP
+		 WHERE user_id=? AND issuer=?`, providerUsername, userID, issuer)
+	}
+	if err != nil {
+		return User{}, errors.New("OIDC identity is not mapped")
+	}
+	var u User
+	var at string
+	err = tx.QueryRowContext(ctx, `SELECT id,username,role,enabled,created_at,
+	 EXISTS(SELECT 1 FROM user_totp WHERE user_id=users.id) FROM users WHERE id=?`,
+		userID).Scan(&u.ID, &u.Username, &u.Role, &u.Enabled, &at, &u.TOTPEnabled)
+	u.CreatedAt = parseTime(at)
+	if err != nil || !u.Enabled || u.Username != claimedUsername {
+		return User{}, errors.New("OIDC identity is not mapped to the claimed SSH user")
+	}
+	if err = tx.Commit(); err != nil {
+		return User{}, err
+	}
+	return u, nil
+}
+
+func scanOIDCIdentity(scanner interface{ Scan(...any) error }) (OIDCIdentity, error) {
+	var identity OIDCIdentity
+	var subject sql.NullString
+	var created, updated string
+	err := scanner.Scan(&identity.ID, &identity.UserID, &identity.Username, &identity.Issuer,
+		&subject, &identity.ProviderUsername, &created, &updated)
+	if subject.Valid {
+		identity.Subject = subject.String
+	}
+	identity.CreatedAt, identity.UpdatedAt = parseTime(created), parseTime(updated)
+	return identity, err
+}
+
+func (s *Store) OIDCIdentityForUser(ctx context.Context, userID int64, issuer string) (OIDCIdentity, error) {
+	return scanOIDCIdentity(s.db.QueryRowContext(ctx, `SELECT o.id,o.user_id,u.username,o.issuer,
+	 o.subject,o.provider_username,o.created_at,o.updated_at FROM oidc_identities o
+	 JOIN users u ON u.id=o.user_id WHERE o.user_id=? AND o.issuer=?`, userID, issuer))
+}
+
+func (s *Store) ListOIDCIdentities(ctx context.Context, issuer string) ([]OIDCIdentity, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT o.id,o.user_id,u.username,o.issuer,
+	 o.subject,o.provider_username,o.created_at,o.updated_at FROM oidc_identities o
+	 JOIN users u ON u.id=o.user_id WHERE o.issuer=? ORDER BY u.username`, issuer)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var identities []OIDCIdentity
+	for rows.Next() {
+		identity, scanErr := scanOIDCIdentity(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		identities = append(identities, identity)
+	}
+	return identities, rows.Err()
+}
+
+func (s *Store) RemoveOIDCIdentity(ctx context.Context, userID int64, issuer string) error {
+	result, err := s.db.ExecContext(ctx, "DELETE FROM oidc_identities WHERE user_id=? AND issuer=?", userID, issuer)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) SetUserEnabled(ctx context.Context, name string, enabled bool) error {

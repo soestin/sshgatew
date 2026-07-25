@@ -64,8 +64,9 @@ privileges.
 ### OIDC login
 
 SSHGateW can authenticate existing users through an OpenID Connect provider
-that advertises the OAuth 2.0 Device Authorization endpoint. Configure the
-issuer and client in an uncommitted `.env` file:
+that advertises the OAuth 2.0 Device Authorization endpoint. Copy
+`.env.example` to an uncommitted `.env` file and configure the issuer and
+client. Docker Compose automatically reads `.env` next to `compose.yaml`:
 
 ```dotenv
 SSHGATEW_OIDC_ENABLED=true
@@ -88,11 +89,14 @@ ssh -p 2222 \
 ```
 
 The SSH session displays the provider verification URL and one-time code.
-Complete login in a browser and return to SSH. The configured username claim
-must match an existing enabled SSHGateW username; OIDC never creates users or
-changes grants. Issuer, signature, audience, and token expiry are verified from
-the provider's discovery metadata and JWKS. If that user has local TOTP
-enabled, SSHGateW requests it after the OIDC login as an additional factor.
+Complete login in a browser and return to SSH. OIDC never creates users or
+changes grants. Each identity must first be linked to an existing enabled
+SSHGateW user. A user can authenticate with a registered gateway SSH key and
+press `o` in the TUI to link their own account. Administrators can select a
+user in the Users panel and map an OIDC username; the first successful login
+permanently binds that mapping to the provider's signed stable subject. Issuer,
+signature, audience, and token expiry are verified from discovery metadata and
+JWKS. Local TOTP remains an additional factor when enabled.
 
 To build the image locally, add `--build`. To upgrade from GHCR without
 reinitializing:

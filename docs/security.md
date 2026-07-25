@@ -7,12 +7,15 @@ downstream credential it manages. Harden and monitor the host accordingly.
 ## Security boundaries
 
 - Gateway users authenticate with either an exact registered public-key
-  fingerprint or an optional OIDC device login under the SSH username they
-  claim.
+  fingerprint or an optional explicitly linked OIDC device identity under the
+  SSH username they claim.
 - OIDC validates discovery over HTTPS, the ID-token signature from JWKS, exact
-  issuer, client audience, expiry, non-empty subject, and a configured username
-  claim matching an existing enabled gateway user. It never provisions users
-  or grants access.
+  issuer, client audience, expiry, non-empty subject, and configured username
+  claim. Authentication resolves the signed issuer and stable subject through
+  an explicit link to an existing enabled gateway user. A pending
+  administrator-created username mapping binds to that stable subject only
+  after a successful signed login. OIDC never provisions users or grants
+  access.
 - Users with TOTP enabled must pass RFC 6238 through SSH keyboard-interactive
   authentication after their public key. This also protects SFTP, SCP, routed
   shells, and forwarding connections that never open the gateway menu. A code

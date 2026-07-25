@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
 
+ARG BUILDPLATFORM=linux/amd64
 FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS build
 
 WORKDIR /src
@@ -8,8 +9,8 @@ RUN go mod download
 COPY . .
 
 ARG VERSION=dev
-ARG TARGETOS
-ARG TARGETARCH
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 RUN version=${VERSION#v} && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
     -trimpath \
     -ldflags "-s -w -X main.version=${version}" \
@@ -25,7 +26,8 @@ RUN apk add --no-cache ca-certificates su-exec \
     && chmod 0750 /etc/sshgatew /var/lib/sshgatew
 
 COPY --from=build /out/sshgatew /usr/local/bin/sshgatew
-COPY --chmod=0755 deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh
 
 EXPOSE 2222
 VOLUME ["/etc/sshgatew", "/var/lib/sshgatew"]

@@ -250,6 +250,7 @@ func TestOIDCKeyboardInteractiveLoginPreservesTOTPPolicy(t *testing.T) {
 	cfg := config.ForDataDir(dir)
 	cfg.ListenAddress = freeAddress(t)
 	cfg.IdleTimeout = config.Duration(time.Minute)
+	cfg.OIDC.IssuerURL = "https://id.example.com/application/o/gateway/"
 	writeHostKey(t, cfg.HostKeyPath)
 	if err := secrets.Generate(cfg.MasterKeyPath); err != nil {
 		t.Fatal(err)
@@ -288,6 +289,9 @@ func TestOIDCKeyboardInteractiveLoginPreservesTOTPPolicy(t *testing.T) {
 	}
 	fake := &fakeOIDCAuthenticator{identity: oidcdevice.Identity{Subject: "subject-123", Username: "alice"}}
 	srv.oidc = fake
+	if err = st.LinkOIDCIdentity(context.Background(), u.ID, cfg.OIDC.IssuerURL, fake.identity.Subject, fake.identity.Username); err != nil {
+		t.Fatal(err)
+	}
 	go func() { _ = srv.ListenAndServe() }()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -331,9 +335,13 @@ func TestOIDCKeyboardInteractiveLoginPreservesTOTPPolicy(t *testing.T) {
 	}
 	client.Close()
 
-	fake.identity.Username = "bob"
+	fake.identity = oidcdevice.Identity{Subject: "unlinked-subject", Username: "bob"}
+	beginsBeforeFailure := fake.begins
 	if bad, dialErr := gossh.Dial("tcp", cfg.ListenAddress, clientConfig); dialErr == nil {
 		bad.Close()
 		t.Fatal("OIDC identity for a different username authenticated")
+	}
+	if fake.begins != beginsBeforeFailure+1 {
+		t.Fatalf("failed OIDC login retried %d times in one SSH connection", fake.begins-beginsBeforeFailure)
 	}
 }

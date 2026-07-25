@@ -16,13 +16,11 @@ named volumes: `sshgatew-config` contains the configuration, while
 up both volumes together. Rebuilding or replacing the container does not rerun
 initialization while the configuration exists.
 
-Useful overrides can be placed in an uncommitted `.env` file:
+Copy `.env.example` to `.env` next to `compose.yaml` for local overrides.
+Docker Compose loads that file automatically:
 
-```dotenv
-SSHGATEW_ADMIN=admin
-SSHGATEW_ADMIN_KEY_FILE=./admin.pub
-SSHGATEW_PORT=2222
-SSHGATEW_VERSION=latest
+```sh
+cp .env.example .env
 ```
 
 Use `docker compose down` to stop the service. Do not add `--volumes` unless
@@ -87,10 +85,23 @@ connections. The terminal prints a verification URI and user code. After
 finishing the browser login, return to the SSH prompt and press Enter.
 
 SSHGateW verifies the ID-token signature, exact issuer, client audience,
-expiry, subject, and configured username claim. The normalized claim must be a
-valid SSHGateW username and match the username claimed in SSH. Users must
-already exist and be enabled; OIDC does not provision accounts or grant target
-access. A locally enrolled TOTP remains required after OIDC succeeds.
+expiry, stable subject, and configured username claim. Users must already
+exist and be enabled; OIDC does not provision accounts or grant target access.
+The signed identity must be explicitly linked to the claimed SSHGateW user.
+
+There are two linking paths:
+
+- A user authenticates to the gateway with a registered SSH key and presses
+  `o` in the TUI. After the device flow, SSHGateW stores the signed issuer,
+  subject, and current provider username for that user.
+- An administrator selects a user in the Users panel and chooses **Map OIDC
+  username**. This creates a pending mapping. Its first successful OIDC login
+  binds it to the signed stable subject.
+
+Once a subject is bound, a later provider username change does not break the
+link. An issuer/subject or issuer/provider-username pair cannot be assigned to
+multiple users. Administrators can change or remove mappings from the Users
+panel. A locally enrolled TOTP remains required after OIDC succeeds.
 
 Docker deployments can set the equivalent
 `SSHGATEW_OIDC_ENABLED`, `SSHGATEW_OIDC_ISSUER`,
