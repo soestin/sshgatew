@@ -14,6 +14,7 @@ encrypted at rest.
 ## Current features
 
 - Public-key authentication to the gateway on port 2222 by default.
+- Optional OIDC device-flow authentication with signed ID-token validation.
 - Optional per-user TOTP second-factor authentication with terminal QR enrollment.
 - Member and administrator terminal interfaces.
 - Per-user and per-group target grants.
@@ -59,6 +60,39 @@ key file is used only when the configuration volume is empty. The service
 process runs as the unprivileged `sshgatew` user; the entrypoint uses its narrow
 startup capabilities only to repair named-volume ownership before dropping
 privileges.
+
+### OIDC login
+
+SSHGateW can authenticate existing users through an OpenID Connect provider
+that advertises the OAuth 2.0 Device Authorization endpoint. Configure the
+issuer and client in an uncommitted `.env` file:
+
+```dotenv
+SSHGATEW_OIDC_ENABLED=true
+SSHGATEW_OIDC_ISSUER=https://identity.example.com/realms/team
+SSHGATEW_OIDC_CLIENT_ID=sshgatew
+SSHGATEW_OIDC_CLIENT_SECRET=
+SSHGATEW_OIDC_USERNAME_CLAIM=preferred_username
+SSHGATEW_OIDC_SCOPES=openid profile email
+SSHGATEW_OIDC_LOGIN_TIMEOUT=5m
+```
+
+Then recreate the container and explicitly select keyboard-interactive login:
+
+```sh
+docker compose up -d
+ssh -p 2222 \
+  -o PubkeyAuthentication=no \
+  -o PreferredAuthentications=keyboard-interactive \
+  alice@gateway.example.com
+```
+
+The SSH session displays the provider verification URL and one-time code.
+Complete login in a browser and return to SSH. The configured username claim
+must match an existing enabled SSHGateW username; OIDC never creates users or
+changes grants. Issuer, signature, audience, and token expiry are verified from
+the provider's discovery metadata and JWKS. If that user has local TOTP
+enabled, SSHGateW requests it after the OIDC login as an additional factor.
 
 To build the image locally, add `--build`. To upgrade from GHCR without
 reinitializing:

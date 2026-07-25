@@ -52,6 +52,55 @@ the bootstrap installer again.
 All commands accept `--config PATH` before the subcommand. The default is
 `/etc/sshgatew/config.toml`.
 
+## OIDC authentication
+
+OIDC is an optional alternative to gateway SSH keys. It uses the OAuth 2.0
+Device Authorization Grant because an SSH daemon cannot safely assume that the
+client machine has a browser or accept a callback on the gateway. The provider
+must publish `device_authorization_endpoint` in its OIDC discovery document.
+
+Configure `/etc/sshgatew/config.toml`:
+
+```toml
+[oidc]
+enabled = true
+issuer_url = "https://identity.example.com/realms/team"
+client_id = "sshgatew"
+client_secret = ""
+username_claim = "preferred_username"
+scopes = ["openid", "profile", "email"]
+login_timeout = "5m0s"
+```
+
+The client should force keyboard-interactive authentication when it wants OIDC
+instead of a registered key:
+
+```sh
+ssh -p 2222 \
+  -o PubkeyAuthentication=no \
+  -o PreferredAuthentications=keyboard-interactive \
+  USER@gateway.example.com
+```
+
+The same form works with routed `USER+TARGET` SSH, SFTP, SCP, and forwarding
+connections. The terminal prints a verification URI and user code. After
+finishing the browser login, return to the SSH prompt and press Enter.
+
+SSHGateW verifies the ID-token signature, exact issuer, client audience,
+expiry, subject, and configured username claim. The normalized claim must be a
+valid SSHGateW username and match the username claimed in SSH. Users must
+already exist and be enabled; OIDC does not provision accounts or grant target
+access. A locally enrolled TOTP remains required after OIDC succeeds.
+
+Docker deployments can set the equivalent
+`SSHGATEW_OIDC_ENABLED`, `SSHGATEW_OIDC_ISSUER`,
+`SSHGATEW_OIDC_CLIENT_ID`, `SSHGATEW_OIDC_CLIENT_SECRET`,
+`SSHGATEW_OIDC_USERNAME_CLAIM`, `SSHGATEW_OIDC_SCOPES`, and
+`SSHGATEW_OIDC_LOGIN_TIMEOUT` variables. Environment values override the TOML
+OIDC section, including for an existing configuration volume. Keep the client
+secret out of version control; providers that register this as a public device
+client do not require one.
+
 ## Users and keys
 
 ```text

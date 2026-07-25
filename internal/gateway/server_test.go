@@ -19,6 +19,7 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 
 	"sshgatew/internal/config"
+	"sshgatew/internal/oidcdevice"
 	"sshgatew/internal/secrets"
 	"sshgatew/internal/store"
 	"sshgatew/internal/totp"
@@ -72,6 +73,21 @@ func (b *lockedBuffer) Write(p []byte) (int, error) {
 	return b.b.Write(p)
 }
 func (b *lockedBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.b.String() }
+
+type fakeOIDCAuthenticator struct {
+	identity oidcdevice.Identity
+	begins   int
+}
+
+func (f *fakeOIDCAuthenticator) Begin(context.Context) (oidcdevice.Login, error) {
+	f.begins++
+	return oidcdevice.Login{UserCode: "ABCD-1234", VerificationURI: "https://id.example.com/activate", VerificationURIComplete: "https://id.example.com/activate?code=ABCD-1234"}, nil
+}
+
+func (f *fakeOIDCAuthenticator) Complete(context.Context, oidcdevice.Login) (oidcdevice.Identity, error) {
+	return f.identity, nil
+}
+
 func TestPublicKeyLoginAndInteractiveTUI(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.ForDataDir(dir)
@@ -226,5 +242,98 @@ func TestPublicKeyLoginAndInteractiveTUI(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("server did not stop")
+	}
+}
+
+func TestOIDCKeyboardInteractiveLoginPreservesTOTPPolicy(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.ForDataDir(dir)
+	cfg.ListenAddress = freeAddress(t)
+	cfg.IdleTimeout = config.Duration(time.Minute)
+	writeHostKey(t, cfg.HostKeyPath)
+	if err := secrets.Generate(cfg.MasterKeyPath); err != nil {
+		t.Fatal(err)
+	}
+	cipher, err := secrets.Load(cfg.MasterKeyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	u, err := st.AddUser(context.Background(), "alice", store.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := totp.GenerateSecret()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce, ciphertext, err := cipher.EncryptTOTP(u.ID, secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = st.SetUserTOTP(context.Background(), u.ID, nonce, ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	code, _, err := totp.Code(secret, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := New(cfg, st, cipher, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeOIDCAuthenticator{identity: oidcdevice.Identity{Subject: "subject-123", Username: "alice"}}
+	srv.oidc = fake
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	})
+
+	var sawOIDC, sawTOTP bool
+	clientConfig := &gossh.ClientConfig{
+		User: "alice",
+		Auth: []gossh.AuthMethod{gossh.KeyboardInteractive(func(name, instruction string, questions []string, _ []bool) ([]string, error) {
+			answers := make([]string, len(questions))
+			switch {
+			case strings.Contains(name, "OIDC"):
+				sawOIDC = strings.Contains(instruction, "https://id.example.com/activate") && strings.Contains(instruction, "ABCD-1234")
+			case strings.Contains(name, "two-factor"):
+				sawTOTP = true
+				for i := range answers {
+					answers[i] = code
+				}
+			}
+			return answers, nil
+		})},
+		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
+		Timeout:         time.Second,
+	}
+	var client *gossh.Client
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		client, err = gossh.Dial("tcp", cfg.ListenAddress, clientConfig)
+		if err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatalf("OIDC SSH handshake failed: %v (oidc=%v totp=%v begins=%d)", err, sawOIDC, sawTOTP, fake.begins)
+	}
+	if !sawOIDC || !sawTOTP || fake.begins != 1 {
+		t.Fatalf("incomplete OIDC/TOTP flow: oidc=%v totp=%v begins=%d", sawOIDC, sawTOTP, fake.begins)
+	}
+	client.Close()
+
+	fake.identity.Username = "bob"
+	if bad, dialErr := gossh.Dial("tcp", cfg.ListenAddress, clientConfig); dialErr == nil {
+		bad.Close()
+		t.Fatal("OIDC identity for a different username authenticated")
 	}
 }

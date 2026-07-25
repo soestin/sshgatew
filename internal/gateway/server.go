@@ -15,6 +15,7 @@ import (
 
 	"sshgatew/internal/config"
 	"sshgatew/internal/downstream"
+	"sshgatew/internal/oidcdevice"
 	"sshgatew/internal/secrets"
 	"sshgatew/internal/store"
 	"sshgatew/internal/tui"
@@ -27,9 +28,15 @@ type Server struct {
 	connector downstream.Connector
 	ssh       *charmssh.Server
 	log       *slog.Logger
+	oidc      oidcAuthenticator
 	mu        sync.Mutex
 	total     int
 	perUser   map[int64]int
+}
+
+type oidcAuthenticator interface {
+	Begin(context.Context) (oidcdevice.Login, error)
+	Complete(context.Context, oidcdevice.Login) (oidcdevice.Identity, error)
 }
 
 func New(cfg config.Config, st *store.Store, cipher *secrets.Cipher, log *slog.Logger) (*Server, error) {
@@ -52,7 +59,10 @@ func New(cfg config.Config, st *store.Store, cipher *secrets.Cipher, log *slog.L
 		return nil, fmt.Errorf("parse gateway host key: %w", err)
 	}
 	s := &Server{cfg: cfg, store: st, cipher: cipher, connector: downstream.Connector{Timeout: cfg.DownstreamTimeout.Value()}, log: log, perUser: map[int64]int{}}
-	s.ssh = &charmssh.Server{Addr: cfg.ListenAddress, Handler: s.handle, ServerConfigCallback: s.serverConfig, KeyboardInteractiveHandler: func(charmssh.Context, gossh.KeyboardInteractiveChallenge) bool { return false }, PtyCallback: func(_ charmssh.Context, p charmssh.Pty) bool { return p.Term != "" }, SessionRequestCallback: s.allowSessionRequest, ChannelHandlers: map[string]charmssh.ChannelHandler{"session": charmssh.DefaultSessionHandler, "direct-tcpip": s.handleDirectTCPIP}, SubsystemHandlers: map[string]charmssh.SubsystemHandler{"sftp": s.handle}, IdleTimeout: cfg.IdleTimeout.Value(), Version: "SSHGateW_0.8"}
+	if cfg.OIDC.Enabled {
+		s.oidc = oidcdevice.New(oidcdevice.Options{IssuerURL: cfg.OIDC.IssuerURL, ClientID: cfg.OIDC.ClientID, ClientSecret: cfg.OIDC.ClientSecret, UsernameClaim: cfg.OIDC.UsernameClaim, Scopes: cfg.OIDC.Scopes})
+	}
+	s.ssh = &charmssh.Server{Addr: cfg.ListenAddress, Handler: s.handle, ServerConfigCallback: s.serverConfig, KeyboardInteractiveHandler: s.keyboardInteractive, PtyCallback: func(_ charmssh.Context, p charmssh.Pty) bool { return p.Term != "" }, SessionRequestCallback: s.allowSessionRequest, ChannelHandlers: map[string]charmssh.ChannelHandler{"session": charmssh.DefaultSessionHandler, "direct-tcpip": s.handleDirectTCPIP}, SubsystemHandlers: map[string]charmssh.SubsystemHandler{"sftp": s.handle}, IdleTimeout: cfg.IdleTimeout.Value(), Version: "SSHGateW_0.9"}
 	s.ssh.AddHostKey(signer)
 	return s, nil
 }
