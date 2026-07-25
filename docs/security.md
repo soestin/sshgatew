@@ -6,8 +6,13 @@ downstream credential it manages. Harden and monitor the host accordingly.
 
 ## Security boundaries
 
-- Gateway users authenticate with an exact registered public-key fingerprint
-  under the SSH username they claim.
+- Gateway users authenticate with either an exact registered public-key
+  fingerprint or an optional OIDC device login under the SSH username they
+  claim.
+- OIDC validates discovery over HTTPS, the ID-token signature from JWKS, exact
+  issuer, client audience, expiry, non-empty subject, and a configured username
+  claim matching an existing enabled gateway user. It never provisions users
+  or grants access.
 - Users with TOTP enabled must pass RFC 6238 through SSH keyboard-interactive
   authentication after their public key. This also protects SFTP, SCP, routed
   shells, and forwarding connections that never open the gateway menu. A code
@@ -47,6 +52,8 @@ target credential because `ssh -N` has no session on which to request an agent.
 ## Operational recommendations
 
 - Restrict port 2222 to trusted networks where possible.
+- Register the OIDC client for device authorization only, restrict its scopes,
+  and keep any client secret outside version control.
 - Keep the OS and SSHGateW dependencies patched; run `govulncheck ./...` before
   releases.
 - Verify all gateway and downstream host fingerprints out-of-band.
