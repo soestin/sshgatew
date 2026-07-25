@@ -59,7 +59,7 @@ INSERT INTO targets(name,host,port,remote_username,credential_kind,host_key_algo
 		t.Fatalf("forwarded-agent target rejected after migration: %v", err)
 	}
 	var version int
-	if err = store.DB().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 6 {
+	if err = store.DB().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 7 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 }
@@ -223,5 +223,50 @@ func TestGatewayKeyCanBeSharedAcrossUsersButNotDuplicatedPerUser(t *testing.T) {
 	}
 	if err := s.AddGatewayKey(ctx, "alice", "SHA256:same", "key", "duplicate"); err == nil {
 		t.Fatal("duplicate key accepted for the same user")
+	}
+}
+
+func TestOIDCIdentityLinkingAndAdminUsernameMapping(t *testing.T) {
+	ctx := context.Background()
+	s := testStore(t)
+	alice, err := s.AddUser(ctx, "alice", RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, err := s.AddUser(ctx, "bob", RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const issuer = "https://identity.example.com/application/o/gateway/"
+	if err = s.SetOIDCUsernameMapping(ctx, alice.ID, issuer, "Alice@Example"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := s.OIDCIdentityForUser(ctx, alice.ID, issuer)
+	if err != nil || pending.Subject != "" || pending.ProviderUsername != "alice@example" {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+	authenticated, err := s.AuthenticateOIDC(ctx, "alice", issuer, "stable-subject", "alice@example")
+	if err != nil || authenticated.ID != alice.ID {
+		t.Fatalf("authenticated=%#v err=%v", authenticated, err)
+	}
+	linked, err := s.OIDCIdentityForUser(ctx, alice.ID, issuer)
+	if err != nil || linked.Subject != "stable-subject" {
+		t.Fatalf("linked=%#v err=%v", linked, err)
+	}
+	// Once linked, provider username changes are accepted through the stable subject.
+	if _, err = s.AuthenticateOIDC(ctx, "alice", issuer, "stable-subject", "alice-renamed"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.LinkOIDCIdentity(ctx, bob.ID, issuer, "stable-subject", "bob"); err == nil {
+		t.Fatal("same OIDC subject linked to two users")
+	}
+	if _, err = s.AuthenticateOIDC(ctx, "bob", issuer, "stable-subject", "alice-renamed"); err == nil {
+		t.Fatal("OIDC identity authenticated as the wrong SSH user")
+	}
+	if err = s.LinkOIDCIdentity(ctx, bob.ID, issuer, "bob-subject", "bob"); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.RemoveOIDCIdentity(ctx, bob.ID, issuer); err != nil {
+		t.Fatal(err)
 	}
 }

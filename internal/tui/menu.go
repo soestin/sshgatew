@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -19,6 +20,7 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 
 	"sshgatew/internal/downstream"
+	"sshgatew/internal/oidcdevice"
 	"sshgatew/internal/secrets"
 	"sshgatew/internal/store"
 	"sshgatew/internal/totp"
@@ -28,6 +30,11 @@ type Result struct {
 	TargetID int64
 	Quit     bool
 	Verified bool
+}
+
+type OIDCAuthenticator interface {
+	Begin(context.Context) (oidcdevice.Login, error)
+	Complete(context.Context, oidcdevice.Login) (oidcdevice.Identity, error)
 }
 
 type pendingOperation struct {
@@ -79,6 +86,12 @@ type Model struct {
 	grants                []store.Grant
 	forwardRules          []store.ForwardRule
 	auditEvents           []store.AuditEvent
+	oidcIdentities        []store.OIDCIdentity
+	oidc                  OIDCAuthenticator
+	oidcIssuer            string
+	oidcTimeout           time.Duration
+	canSelfLinkOIDC       bool
+	oidcLogin             oidcdevice.Login
 	mode, input           string
 	searching             bool
 	pending               *pendingOperation
@@ -90,6 +103,9 @@ type Model struct {
 
 func New(ctx context.Context, s *store.Store, cipher *secrets.Cipher, timeout time.Duration, sourceAddress string, u store.User, status string) *Model {
 	return &Model{ctx: ctx, store: s, cipher: cipher, timeout: timeout, sourceAddress: sourceAddress, user: u, status: status, section: "targets"}
+}
+func (m *Model) ConfigureOIDC(authenticator OIDCAuthenticator, issuer string, timeout time.Duration, canSelfLink bool) {
+	m.oidc, m.oidcIssuer, m.oidcTimeout, m.canSelfLinkOIDC = authenticator, issuer, timeout, canSelfLink
 }
 func NewTOTPChallenge(ctx context.Context, s *store.Store, cipher *secrets.Cipher, sourceAddress string, u store.User) *Model {
 	return &Model{ctx: ctx, store: s, cipher: cipher, sourceAddress: sourceAddress, user: u, section: "targets", mode: "totp_auth", status: "Enter the current code from your authenticator app."}
@@ -104,15 +120,16 @@ func (m *Model) Init() tea.Cmd { return func() tea.Msg { return reloadMsg{} } }
 
 type reloadMsg struct{}
 type dataMsg struct {
-	targets      []store.Target
-	users        []store.User
-	groups       []store.Group
-	groupMembers []store.GroupMember
-	identities   []store.SSHIdentity
-	grants       []store.Grant
-	forwardRules []store.ForwardRule
-	auditEvents  []store.AuditEvent
-	err          error
+	targets        []store.Target
+	users          []store.User
+	groups         []store.Group
+	groupMembers   []store.GroupMember
+	identities     []store.SSHIdentity
+	grants         []store.Grant
+	forwardRules   []store.ForwardRule
+	auditEvents    []store.AuditEvent
+	oidcIdentities []store.OIDCIdentity
+	err            error
 }
 type hostKeyMsg struct {
 	key gossh.PublicKey
@@ -122,6 +139,14 @@ type mutationMsg struct {
 	status  string
 	section string
 	err     error
+}
+type oidcBeginMsg struct {
+	login oidcdevice.Login
+	err   error
+}
+type oidcLinkMsg struct {
+	identity oidcdevice.Identity
+	err      error
 }
 
 func (m *Model) load() tea.Msg {
@@ -136,8 +161,22 @@ func (m *Model) load() tea.Msg {
 		return dataMsg{err: e}
 	}
 	d := dataMsg{targets: ts}
+	if m.oidcIssuer != "" {
+		if m.user.Role == store.RoleAdmin {
+			d.oidcIdentities, d.err = m.store.ListOIDCIdentities(m.ctx, m.oidcIssuer)
+		} else {
+			identity, identityErr := m.store.OIDCIdentityForUser(m.ctx, m.user.ID, m.oidcIssuer)
+			if identityErr == nil {
+				d.oidcIdentities = []store.OIDCIdentity{identity}
+			} else if !errors.Is(identityErr, sql.ErrNoRows) {
+				d.err = identityErr
+			}
+		}
+	}
 	if m.user.Role == store.RoleAdmin {
-		d.users, d.err = m.store.ListUsers(m.ctx)
+		if d.err == nil {
+			d.users, d.err = m.store.ListUsers(m.ctx)
+		}
 		if d.err == nil {
 			d.groups, d.err = m.store.ListGroups(m.ctx)
 		}
@@ -164,12 +203,28 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case reloadMsg:
 		return m, m.load
 	case dataMsg:
-		m.targets, m.users, m.groups, m.groupMembers, m.identities, m.grants, m.forwardRules, m.auditEvents = v.targets, v.users, v.groups, v.groupMembers, v.identities, v.grants, v.forwardRules, v.auditEvents
+		m.targets, m.users, m.groups, m.groupMembers, m.identities, m.grants, m.forwardRules, m.auditEvents, m.oidcIdentities = v.targets, v.users, v.groups, v.groupMembers, v.identities, v.grants, v.forwardRules, v.auditEvents, v.oidcIdentities
 		if v.err != nil {
 			m.status = v.err.Error()
 		}
 		m.clamp()
 		return m, nil
+	case oidcBeginMsg:
+		if v.err != nil {
+			m.closeModal("OIDC linking failed: " + v.err.Error())
+			return m, nil
+		}
+		m.oidcLogin, m.mode = v.login, "oidc_link"
+		m.status = "Complete sign-in in your browser, then press Enter."
+		return m, nil
+	case oidcLinkMsg:
+		if v.err != nil {
+			m.closeModal("OIDC linking failed: " + v.err.Error())
+			return m, nil
+		}
+		m.mode, m.pending = "", nil
+		m.status = "OIDC account linked as " + v.identity.Username + "."
+		return m, m.load
 	case hostKeyMsg:
 		if v.err != nil {
 			m.mode = ""
@@ -241,6 +296,9 @@ func (m *Model) handleKey(key string) tea.Cmd {
 	if key == "ctrl+c" || key == "q" {
 		m.result = &Result{Quit: true}
 		return tea.Quit
+	}
+	if key == "o" {
+		return m.startOIDCLink()
 	}
 	if m.user.Role == store.RoleAdmin {
 		switch key {
@@ -349,6 +407,12 @@ func (m *Model) handleModeKey(key string) tea.Cmd {
 		if key == "enter" {
 			return m.finishTOTPEnrollment()
 		}
+	case "oidc_link":
+		if key == "enter" {
+			return m.completeOIDCLink()
+		}
+	case "oidc_start", "oidc_complete":
+		return nil
 	case "form":
 		return m.handleFormKey(key)
 	case "actions", "key_remove", "member_add", "member_remove":
@@ -477,6 +541,56 @@ func (m *Model) closeModal(status string) {
 	m.status = status
 }
 
+func (m *Model) startOIDCLink() tea.Cmd {
+	if m.oidc == nil || m.oidcIssuer == "" {
+		m.status = "OIDC linking is not configured."
+		return nil
+	}
+	if !m.canSelfLinkOIDC {
+		m.status = "Sign in with an SSH key before linking an OIDC account."
+		return nil
+	}
+	m.mode, m.pending = "oidc_start", &pendingOperation{user: m.user, username: m.user.Username}
+	m.status = "Starting secure OIDC account linking…"
+	return func() tea.Msg {
+		timeout := m.oidcTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Minute
+		}
+		ctx, cancel := context.WithTimeout(m.ctx, timeout)
+		defer cancel()
+		login, err := m.oidc.Begin(ctx)
+		return oidcBeginMsg{login: login, err: err}
+	}
+}
+
+func (m *Model) completeOIDCLink() tea.Cmd {
+	if m.oidc == nil || m.pending == nil {
+		m.closeModal("OIDC linking state expired.")
+		return nil
+	}
+	login, user := m.oidcLogin, m.pending.user
+	m.mode, m.status = "oidc_complete", "Waiting for Authentik to finish authorization…"
+	return func() tea.Msg {
+		timeout := m.oidcTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Minute
+		}
+		ctx, cancel := context.WithTimeout(m.ctx, timeout)
+		defer cancel()
+		identity, err := m.oidc.Complete(ctx, login)
+		if err == nil {
+			err = m.store.LinkOIDCIdentity(ctx, user.ID, m.oidcIssuer, identity.Subject, identity.Username)
+		}
+		if err == nil {
+			details := map[string]any{"issuer": m.oidcIssuer, "provider_username": identity.Username}
+			b, _ := json.Marshal(details)
+			err = m.store.Audit(ctx, store.AuditEvent{ActorUserID: &user.ID, ClaimedUsername: user.Username, SourceAddress: m.sourceAddress, EventType: "user.oidc.link", Outcome: "success", Details: string(b)})
+		}
+		return oidcLinkMsg{identity: identity, err: err}
+	}
+}
+
 func (m *Model) openAddForm() tea.Cmd {
 	if m.user.Role != store.RoleAdmin {
 		return nil
@@ -549,6 +663,14 @@ func (m *Model) openSelectedActions() tea.Cmd {
 			totpAction = actionItem{"Remove TOTP", "user_totp_remove"}
 		}
 		m.actions = []actionItem{{"Add SSH key", "user_key_add"}, {"Remove SSH key", "user_key_remove"}, totpAction, {role, "user_role"}, {state, "user_toggle"}, {"Delete", "user_delete"}}
+		if m.oidcIssuer != "" {
+			label := "Map OIDC username"
+			if _, ok := m.oidcIdentityForUser(u.ID); ok {
+				label = "Change OIDC mapping"
+				m.actions = append(m.actions, actionItem{"Remove OIDC mapping", "user_oidc_remove"})
+			}
+			m.actions = append([]actionItem{{label, "user_oidc_map"}}, m.actions...)
+		}
 	case "keys":
 		if len(m.identities) == 0 {
 			m.status = "No SSH key selected."
@@ -645,7 +767,7 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 	case "target_toggle":
 		enabled := !p.target.Enabled
 		return m.mutate("targets", "Target updated.", "admin.target."+enabledWord(enabled), map[string]any{"target": p.target.Name}, func() error { return m.store.SetTargetEnabled(m.ctx, p.target.Name, enabled) })
-	case "target_delete", "user_delete", "group_delete", "grant_delete", "forward_delete", "identity_delete", "user_totp_remove":
+	case "target_delete", "user_delete", "group_delete", "grant_delete", "forward_delete", "identity_delete", "user_totp_remove", "user_oidc_remove":
 		p.kind = code
 		m.mode = "confirm_delete"
 	case "identity_view":
@@ -668,6 +790,13 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 		p.kind, p.totpSecret, p.totpURI, p.totpQR = "user_totp_setup", secret, uri, qr
 		m.mode = "totp_enroll"
 		m.status = "Scan the QR code, then press Enter."
+	case "user_oidc_map":
+		value := ""
+		if identity, ok := m.oidcIdentityForUser(p.user.ID); ok {
+			value = identity.ProviderUsername
+		}
+		m.form = &adminForm{kind: "user_oidc_map", title: "Map OIDC account for " + p.username, fields: []formField{{label: "OIDC username", value: value}}}
+		m.mode = "form"
 	case "user_key_remove":
 		keys, err := m.store.ListGatewayKeys(m.ctx, p.username)
 		if err != nil || len(keys) == 0 {
@@ -867,6 +996,11 @@ func (m *Model) submitForm() tea.Cmd {
 		return nil
 	case "user_add":
 		return m.mutate("users", "User added.", "admin.user.add", map[string]any{"username": values[0], "role": values[1]}, func() error { _, err := m.store.AddUser(m.ctx, values[0], values[1]); return err })
+	case "user_oidc_map":
+		p := m.pending
+		return m.mutate("users", "OIDC username mapped; it will bind permanently on first login.", "admin.user.oidc.map", map[string]any{"username": p.username, "provider_username": strings.ToLower(values[0]), "issuer": m.oidcIssuer}, func() error {
+			return m.store.SetOIDCUsernameMapping(m.ctx, p.user.ID, m.oidcIssuer, values[0])
+		})
 	case "group_add":
 		return m.mutate("groups", "Group added.", "admin.group.add", map[string]any{"group": values[0]}, func() error { return m.store.AddGroup(m.ctx, values[0]) })
 	case "grant_add":
@@ -985,6 +1119,8 @@ func (m *Model) finishDelete() tea.Cmd {
 		return m.mutate("forwards", "TCP destination removed.", "admin.forward.remove", map[string]any{"target": r.Target, "host": r.Host, "port": r.Port}, func() error { return m.store.DeleteForwardRule(m.ctx, r.ID) })
 	case "user_totp_remove":
 		return m.mutate("users", "TOTP removed.", "admin.user.totp.remove", map[string]any{"username": p.username}, func() error { return m.store.RemoveUserTOTP(m.ctx, p.user.ID) })
+	case "user_oidc_remove":
+		return m.mutate("users", "OIDC mapping removed.", "admin.user.oidc.remove", map[string]any{"username": p.username, "issuer": m.oidcIssuer}, func() error { return m.store.RemoveOIDCIdentity(m.ctx, p.user.ID, m.oidcIssuer) })
 	case "identity_delete":
 		return m.mutate("keys", "SSH key deleted.", "admin.ssh_identity.delete", map[string]any{"ssh_key": p.identity.Name, "fingerprint": p.identity.Fingerprint}, func() error { return m.store.DeleteSSHIdentity(m.ctx, p.identity.Name) })
 	}
@@ -1054,6 +1190,15 @@ func (m *Model) isGroupMember(group, username string) bool {
 		}
 	}
 	return false
+}
+
+func (m *Model) oidcIdentityForUser(userID int64) (store.OIDCIdentity, bool) {
+	for _, identity := range m.oidcIdentities {
+		if identity.UserID == userID && identity.Issuer == m.oidcIssuer {
+			return identity, true
+		}
+	}
+	return store.OIDCIdentity{}, false
 }
 
 func targetNames(values []store.Target) []string {
@@ -1701,7 +1846,14 @@ func (m *Model) content(inner int) (string, string, []string) {
 			if u.TOTPEnabled {
 				mfa = "TOTP ON"
 			}
-			rows = append(rows, fmt.Sprintf("  %-20s  %-8s  %-8s  %s", u.Username, strings.ToUpper(u.Role), mfa, state))
+			oidcState := "OIDC OFF"
+			if identity, ok := m.oidcIdentityForUser(u.ID); ok {
+				oidcState = "OIDC PENDING"
+				if identity.Subject != "" {
+					oidcState = "OIDC LINKED"
+				}
+			}
+			rows = append(rows, fmt.Sprintf("  %-18s  %-7s  %-8s  %-12s  %s", u.Username, strings.ToUpper(u.Role), mfa, oidcState, state))
 		}
 		return "Users", dim + "  Gateway identities and roles" + reset, rows
 	case "groups":
@@ -1768,7 +1920,7 @@ func (m *Model) content(inner int) (string, string, []string) {
 func (m *Model) modalContent(inner int) (string, string, []string) {
 	switch m.mode {
 	case "help":
-		return "Keyboard help", "  Press any key to return", []string{"  ↑/↓ or j/k     Move selection", "  Enter          Connect/manage selected item", "  a              Add item in current section", "  m              Manage selected item", "  Tab            Move through form fields", "  ←/→            Change option or section", "  /              Search targets", "  1–7            Change admin section", "  r              Refresh data", "  q              Disconnect from SSHGateW"}
+		return "Keyboard help", "  Press any key to return", []string{"  ↑/↓ or j/k     Move selection", "  Enter          Connect/manage selected item", "  a              Add item in current section", "  m              Manage selected item", "  o              Link my OIDC account (key login)", "  Tab            Move through form fields", "  ←/→            Change option or section", "  /              Search targets", "  1–7            Change admin section", "  r              Refresh data", "  q              Disconnect from SSHGateW"}
 	case "form":
 		if m.form == nil {
 			return "Form", "  Esc cancels", nil
@@ -1824,6 +1976,8 @@ func (m *Model) modalContent(inner int) (string, string, []string) {
 				name = "SSH key " + m.pending.identity.Name
 			case "user_totp_remove":
 				name = "TOTP for user " + m.pending.username
+			case "user_oidc_remove":
+				name = "OIDC mapping for user " + m.pending.username
 			}
 		}
 		return "Confirm removal", red + "  This change takes effect immediately" + reset, []string{"", "  Remove " + name + "?", "", red + "  y  Remove" + reset, dim + "  n  Keep it" + reset}
@@ -1865,6 +2019,18 @@ func (m *Model) modalContent(inner int) (string, string, []string) {
 		return "Confirm TOTP enrollment", "  Enter the current six-digit authenticator code", rows
 	case "totp_auth":
 		return "Two-factor authentication", "  Public key accepted • TOTP required", []string{"", fmt.Sprintf("  %s  %d digits captured", strings.Repeat("•", minInt(len(m.input), 6)), len(m.input)), "", green + "  Enter  Verify" + reset, dim + "  Esc    Disconnect" + reset}
+	case "oidc_start":
+		return "Link OIDC account", "  Requesting a device authorization code…", []string{"", cyan + "  ◌ Contacting the configured identity provider" + reset}
+	case "oidc_link":
+		rows := []string{"  Open          " + m.oidcLogin.VerificationURI, "  Enter code    " + m.oidcLogin.UserCode}
+		if m.oidcLogin.VerificationURIComplete != "" {
+			rows = append(rows, "", "  Direct link:")
+			rows = append(rows, wrapText("  "+m.oidcLogin.VerificationURIComplete, maxInt(inner-2, 16))...)
+		}
+		rows = append(rows, "", green+"  Enter  Finish linking after browser approval"+reset)
+		return "Link OIDC account", "  The signed provider identity will be bound to " + m.user.Username, rows
+	case "oidc_complete":
+		return "Link OIDC account", "  Verifying the signed identity and saving its stable subject…", []string{"", cyan + "  ◌ Waiting for authorization" + reset}
 	default:
 		return "Working", "  Please wait…", nil
 	}
@@ -1894,6 +2060,9 @@ func (m *Model) footer() string {
 		return dim + "  Type to filter  •  Enter apply  •  Esc clear" + reset
 	}
 	actions := "  ↑↓ navigate  •  Enter connect  •  / search  •  ? help  •  q quit"
+	if m.canSelfLinkOIDC && m.oidc != nil {
+		actions = "  Enter connect  •  o link OIDC  •  / search  •  ? help  •  q quit"
+	}
 	if m.user.Role == store.RoleAdmin {
 		switch m.section {
 		case "targets":

@@ -32,6 +32,13 @@ type GatewayKey struct {
 	Fingerprint, PublicKey, Label string
 	CreatedAt                     time.Time
 }
+type OIDCIdentity struct {
+	ID, UserID           int64
+	Username             string
+	Issuer, Subject      string
+	ProviderUsername     string
+	CreatedAt, UpdatedAt time.Time
+}
 type Group struct {
 	ID        int64
 	Name      string

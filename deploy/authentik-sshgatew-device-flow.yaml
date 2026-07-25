@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://goauthentik.io/blueprints/schema.json
+
+version: 1
+
+metadata:
+  name: SSHGateW - Device code flow
+  labels:
+    blueprints.goauthentik.io/description: >-
+      Authenticated stage-configuration flow used by Authentik's OAuth2/OIDC
+      device authorization endpoint for SSHGateW.
+
+entries:
+  - model: authentik_flows.flow
+    state: present
+    id: sshgatew-device-code-flow
+    identifiers:
+      slug: sshgatew-device-code-flow
+    attrs:
+      name: SSHGateW Device Code Flow
+      title: Authorize SSHGateW
+      designation: stage_configuration
+      authentication: require_authenticated
+      denied_action: message_continue
+      policy_engine_mode: any

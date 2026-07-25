@@ -15,10 +15,22 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	gossh "golang.org/x/crypto/ssh"
 
+	"sshgatew/internal/oidcdevice"
 	"sshgatew/internal/secrets"
 	"sshgatew/internal/store"
 	"sshgatew/internal/totp"
 )
+
+type fakeOIDCLinker struct {
+	identity oidcdevice.Identity
+}
+
+func (f *fakeOIDCLinker) Begin(context.Context) (oidcdevice.Login, error) {
+	return oidcdevice.Login{UserCode: "123-456", VerificationURI: "https://id.example.com/device", VerificationURIComplete: "https://id.example.com/device?code=123-456"}, nil
+}
+func (f *fakeOIDCLinker) Complete(context.Context, oidcdevice.Login) (oidcdevice.Identity, error) {
+	return f.identity, nil
+}
 
 func testModel(t *testing.T) (*Model, *store.Store) {
 	t.Helper()
@@ -452,6 +464,52 @@ func TestAdminCommandPaletteIsNotExposed(t *testing.T) {
 	m.handleKey(":")
 	if m.mode != "" {
 		t.Fatalf("colon opened obsolete mode %q", m.mode)
+	}
+}
+
+func TestSelfServiceAndAdminOIDCMapping(t *testing.T) {
+	m, st := testModel(t)
+	const issuer = "https://id.example.com/application/o/gateway/"
+	linker := &fakeOIDCLinker{identity: oidcdevice.Identity{Subject: "admin-subject", Username: "provider-admin"}}
+	m.ConfigureOIDC(linker, issuer, time.Minute, true)
+	applyMessage(m, reloadMsg{})
+	applyCommand(m, m.handleKey("o"))
+	if m.mode != "oidc_link" || m.oidcLogin.UserCode != "123-456" {
+		t.Fatalf("self-service OIDC flow did not show device code: mode=%q", m.mode)
+	}
+	applyCommand(m, m.handleKey("enter"))
+	linked, err := st.OIDCIdentityForUser(context.Background(), m.user.ID, issuer)
+	if err != nil || linked.Subject != "admin-subject" || linked.ProviderUsername != "provider-admin" {
+		t.Fatalf("linked=%#v err=%v", linked, err)
+	}
+
+	alice, err := st.AddUser(context.Background(), "alice", store.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyMessage(m, reloadMsg{})
+	m.section = "users"
+	for i, user := range m.users {
+		if user.ID == alice.ID {
+			m.cursor = i
+		}
+	}
+	m.openSelectedActions()
+	if cmd := m.dispatchAction("user_oidc_map"); cmd != nil {
+		t.Fatal("admin OIDC mapping unexpectedly asynchronous before form submission")
+	}
+	typeKeys(m, "alice@auth")
+	applyCommand(m, m.handleKey("enter"))
+	pending, err := st.OIDCIdentityForUser(context.Background(), alice.ID, issuer)
+	if err != nil || pending.Subject != "" || pending.ProviderUsername != "alice@auth" {
+		t.Fatalf("pending=%#v err=%v", pending, err)
+	}
+
+	m.ConfigureOIDC(linker, issuer, time.Minute, false)
+	m.mode = ""
+	m.handleKey("o")
+	if m.mode != "" || !strings.Contains(m.status, "SSH key") {
+		t.Fatal("OIDC self-linking was allowed without key authentication")
 	}
 }
 

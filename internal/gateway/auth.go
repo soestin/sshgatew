@@ -18,10 +18,11 @@ import (
 type authState struct {
 	User       store.User
 	TargetName string
+	AuthMethod string
 }
 
-func authPermissions(username, target string) *gossh.Permissions {
-	return &gossh.Permissions{Extensions: map[string]string{"sshgatew-user": username, "sshgatew-target": target}}
+func authPermissions(username, target, method string) *gossh.Permissions {
+	return &gossh.Permissions{Extensions: map[string]string{"sshgatew-user": username, "sshgatew-target": target, "sshgatew-auth-method": method}}
 }
 
 func (s *Server) stateFromContext(ctx charmssh.Context) (authState, bool) {
@@ -33,7 +34,7 @@ func (s *Server) stateFromContext(ctx charmssh.Context) (authState, bool) {
 	if err != nil || !u.Enabled {
 		return authState{}, false
 	}
-	return authState{User: u, TargetName: target}, true
+	return authState{User: u, TargetName: target, AuthMethod: ctx.Permissions().Extensions["sshgatew-auth-method"]}, true
 }
 
 func splitRoutedUsername(value string) (string, string, error) {
@@ -68,24 +69,31 @@ func (s *Server) serverConfig(ctx charmssh.Context) *gossh.ServerConfig {
 			return nil, errors.New("permission denied")
 		}
 		if !u.TOTPEnabled {
-			return authPermissions(username, target), nil
+			return authPermissions(username, target, "publickey"), nil
 		}
 		return nil, &gossh.PartialSuccessError{Next: gossh.ServerAuthCallbacks{KeyboardInteractiveCallback: func(_ gossh.ConnMetadata, challenge gossh.KeyboardInteractiveChallenge) (*gossh.Permissions, error) {
 			if err := s.authenticateTOTP(u, username, meta.RemoteAddr().String(), challenge); err != nil {
 				return nil, err
 			}
-			return authPermissions(username, target), nil
+			return authPermissions(username, target, "publickey"), nil
 		}}}
 	}}
 	return config
 }
 
+var oidcAttemptedContextKey = &struct{ name string }{"sshgatew-oidc-attempted"}
+
 func (s *Server) keyboardInteractive(ctx charmssh.Context, challenge gossh.KeyboardInteractiveChallenge) bool {
 	if s.oidc == nil {
 		return false
 	}
+	if attempted, _ := ctx.Value(oidcAttemptedContextKey).(bool); attempted {
+		return false
+	}
+	ctx.SetValue(oidcAttemptedContextKey, true)
 	permissions, err := s.authenticateOIDC(ctx.User(), ctx.RemoteAddr().String(), challenge)
 	if err != nil {
+		s.log.Warn("OIDC authentication failed", "user", ctx.User(), "source", ctx.RemoteAddr().String(), "error", err)
 		return false
 	}
 	ctx.Permissions().Permissions = permissions
@@ -119,21 +127,26 @@ func (s *Server) authenticateOIDC(claimedUsername, source string, challenge goss
 		return nil, errors.New("OIDC authentication cancelled")
 	}
 	identity, err := s.oidc.Complete(ctx, login)
-	if err != nil || !validOIDCSubject(identity.Subject) || identity.Username != username || store.ValidateUsername(identity.Username) != nil {
+	if err != nil || !validOIDCSubject(identity.Subject) {
 		subject := ""
 		if err == nil {
 			subject = identity.Subject
 		}
 		s.auditOIDC(&u.ID, username, source, target, subject, "denied")
-		return nil, errors.New("OIDC identity does not match the SSH username")
+		return nil, errors.New("OIDC identity could not be verified")
+	}
+	mappedUser, err := s.store.AuthenticateOIDC(ctx, username, s.cfg.OIDC.IssuerURL, identity.Subject, identity.Username)
+	if err != nil {
+		s.auditOIDC(&u.ID, username, source, target, identity.Subject, "denied")
+		return nil, errors.New("OIDC identity is not linked to this SSHGateW user")
 	}
 	s.auditOIDC(&u.ID, username, source, target, identity.Subject, "success")
-	if u.TOTPEnabled {
-		if err = s.authenticateTOTP(u, username, source, challenge); err != nil {
+	if mappedUser.TOTPEnabled {
+		if err = s.authenticateTOTP(mappedUser, username, source, challenge); err != nil {
 			return nil, err
 		}
 	}
-	return authPermissions(username, target), nil
+	return authPermissions(username, target, "oidc"), nil
 }
 
 func (s *Server) authenticateTOTP(u store.User, username, source string, challenge gossh.KeyboardInteractiveChallenge) error {

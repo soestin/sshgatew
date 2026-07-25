@@ -62,7 +62,7 @@ func New(cfg config.Config, st *store.Store, cipher *secrets.Cipher, log *slog.L
 	if cfg.OIDC.Enabled {
 		s.oidc = oidcdevice.New(oidcdevice.Options{IssuerURL: cfg.OIDC.IssuerURL, ClientID: cfg.OIDC.ClientID, ClientSecret: cfg.OIDC.ClientSecret, UsernameClaim: cfg.OIDC.UsernameClaim, Scopes: cfg.OIDC.Scopes})
 	}
-	s.ssh = &charmssh.Server{Addr: cfg.ListenAddress, Handler: s.handle, ServerConfigCallback: s.serverConfig, KeyboardInteractiveHandler: s.keyboardInteractive, PtyCallback: func(_ charmssh.Context, p charmssh.Pty) bool { return p.Term != "" }, SessionRequestCallback: s.allowSessionRequest, ChannelHandlers: map[string]charmssh.ChannelHandler{"session": charmssh.DefaultSessionHandler, "direct-tcpip": s.handleDirectTCPIP}, SubsystemHandlers: map[string]charmssh.SubsystemHandler{"sftp": s.handle}, IdleTimeout: cfg.IdleTimeout.Value(), Version: "SSHGateW_0.9"}
+	s.ssh = &charmssh.Server{Addr: cfg.ListenAddress, Handler: s.handle, ServerConfigCallback: s.serverConfig, KeyboardInteractiveHandler: s.keyboardInteractive, PtyCallback: func(_ charmssh.Context, p charmssh.Pty) bool { return p.Term != "" }, SessionRequestCallback: s.allowSessionRequest, ChannelHandlers: map[string]charmssh.ChannelHandler{"session": charmssh.DefaultSessionHandler, "direct-tcpip": s.handleDirectTCPIP}, SubsystemHandlers: map[string]charmssh.SubsystemHandler{"sftp": s.handle}, IdleTimeout: cfg.IdleTimeout.Value(), Version: "SSHGateW_0.10"}
 	s.ssh.AddHostKey(signer)
 	return s, nil
 }
@@ -128,6 +128,9 @@ func (s *Server) handle(sess charmssh.Session) {
 	for {
 		pty, windows, _ := sess.Pty()
 		m := tui.New(sess.Context(), s.store, s.cipher, s.cfg.DownstreamTimeout.Value(), sess.RemoteAddr().String(), u, status)
+		if s.oidc != nil {
+			m.ConfigureOIDC(s.oidc, s.cfg.OIDC.IssuerURL, s.cfg.OIDC.LoginTimeout.Value(), state.AuthMethod == "publickey")
+		}
 		result, err := tui.RunRemote(sess.Context(), sess, pty.Window, windows, m)
 		if err != nil {
 			if sess.Context().Err() == nil {
