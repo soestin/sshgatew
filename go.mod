@@ -6,15 +6,15 @@ require (
 	charm.land/bubbletea/v2 v2.0.8
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be
 	github.com/charmbracelet/ssh v0.0.0-20250826160808-ebfa259c7309
-	github.com/charmbracelet/x/ansi v0.11.7
+	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/pelletier/go-toml/v2 v2.4.3
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
-	golang.org/x/crypto v0.54.0
+	golang.org/x/crypto v0.55.0
 	golang.org/x/oauth2 v0.36.0
 	golang.org/x/term v0.45.0
-	modernc.org/sqlite v1.55.0
+	modernc.org/sqlite v1.56.0
 )
 
 require (
@@ -31,8 +31,8 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/mattn/go-runewidth v0.0.23 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/mattn/go-runewidth v0.0.24 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
@@ -40,7 +40,7 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/sync v0.21.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	modernc.org/libc v1.74.1 // indirect
+	modernc.org/libc v1.74.4 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect
 )
