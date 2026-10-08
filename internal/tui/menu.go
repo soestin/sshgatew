@@ -47,6 +47,7 @@ type pendingOperation struct {
 	forwardRule                               store.ForwardRule
 	identity                                  store.SSHIdentity
 	identityID                                int64
+	keyFingerprint                            string
 	privateKey                                []byte
 	hostKey                                   gossh.PublicKey
 	totpSecret, totpURI                       string
@@ -415,7 +416,7 @@ func (m *Model) handleModeKey(key string) tea.Cmd {
 		return nil
 	case "form":
 		return m.handleFormKey(key)
-	case "actions", "key_remove", "member_add", "member_remove":
+	case "actions", "user_keys", "member_add", "member_remove":
 		return m.handleActionKey(key)
 	case "identity_public":
 		m.closeModal("")
@@ -662,7 +663,7 @@ func (m *Model) openSelectedActions() tea.Cmd {
 		if u.TOTPEnabled {
 			totpAction = actionItem{"Remove TOTP", "user_totp_remove"}
 		}
-		m.actions = []actionItem{{"Add SSH key", "user_key_add"}, {"Remove SSH key", "user_key_remove"}, totpAction, {role, "user_role"}, {state, "user_toggle"}, {"Delete", "user_delete"}}
+		m.actions = []actionItem{{"Manage SSH keys", "user_keys"}, totpAction, {role, "user_role"}, {state, "user_toggle"}, {"Delete", "user_delete"}}
 		if m.oidcIssuer != "" {
 			label := "Map OIDC username"
 			if _, ok := m.oidcIdentityForUser(u.ID); ok {
@@ -729,7 +730,12 @@ func (m *Model) handleActionKey(key string) tea.Cmd {
 	case "enter", "space":
 		if len(m.actions) > 0 {
 			code := m.actions[m.actionCursor].code
-			if m.mode == "key_remove" || m.mode == "member_add" || m.mode == "member_remove" {
+			if m.mode == "user_keys" && code != "user_key_add" {
+				m.pending.kind, m.pending.keyFingerprint = "user_key_remove", code
+				m.mode = "confirm_delete"
+				return nil
+			}
+			if m.mode == "member_add" || m.mode == "member_remove" {
 				code = m.mode
 			}
 			return m.dispatchAction(code)
@@ -772,6 +778,22 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 		m.mode = "confirm_delete"
 	case "identity_view":
 		m.mode = "identity_public"
+	case "user_keys":
+		keys, err := m.store.ListGatewayKeys(m.ctx, p.username)
+		if err != nil {
+			m.closeModal("Unable to load SSH keys: " + err.Error())
+			return nil
+		}
+		m.actions = []actionItem{{"Add another SSH key", "user_key_add"}}
+		for _, key := range keys {
+			label := key.Fingerprint
+			if key.Label != "" {
+				label = key.Label + "  " + label
+			}
+			m.actions = append(m.actions, actionItem{label, key.Fingerprint})
+		}
+		m.mode, m.actionCursor = "user_keys", 0
+		m.status = fmt.Sprintf("%s has %d SSH key(s). Adding a key keeps existing keys working.", p.username, len(keys))
 	case "user_key_add":
 		m.mode, m.input = "public_key", ""
 		m.status = "Paste an OpenSSH public key, then press Enter."
@@ -797,21 +819,6 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 		}
 		m.form = &adminForm{kind: "user_oidc_map", title: "Map OIDC account for " + p.username, fields: []formField{{label: "OIDC username", value: value}}}
 		m.mode = "form"
-	case "user_key_remove":
-		keys, err := m.store.ListGatewayKeys(m.ctx, p.username)
-		if err != nil || len(keys) == 0 {
-			m.closeModal("No SSH keys available to remove.")
-			return nil
-		}
-		m.actions = make([]actionItem, 0, len(keys))
-		for _, key := range keys {
-			label := key.Fingerprint
-			if key.Label != "" {
-				label += "  " + key.Label
-			}
-			m.actions = append(m.actions, actionItem{label: label, code: key.Fingerprint})
-		}
-		m.mode, m.actionCursor = "key_remove", 0
 	case "user_role":
 		role := store.RoleAdmin
 		if p.user.Role == store.RoleAdmin {
@@ -835,9 +842,6 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 			return nil
 		}
 		m.mode, m.actionCursor = strings.TrimPrefix(code, "group_"), 0
-	case "key_remove":
-		fingerprint := m.actions[m.actionCursor].code
-		return m.mutate("users", "SSH key removed.", "admin.gateway_key.remove", map[string]any{"username": p.username, "fingerprint": fingerprint}, func() error { return m.store.RemoveGatewayKey(m.ctx, p.username, fingerprint) })
 	case "member_add", "member_remove":
 		username := m.actions[m.actionCursor].code
 		adding := code == "member_add"
@@ -1077,14 +1081,17 @@ func (m *Model) submitForm() tea.Cmd {
 func (m *Model) finishPublicKey() tea.Cmd {
 	p := m.pending
 	raw := strings.TrimSpace(m.input)
-	key, _, _, _, err := gossh.ParseAuthorizedKey([]byte(raw))
+	key, comment, _, rest, err := gossh.ParseAuthorizedKey([]byte(raw))
+	if err == nil && len(bytes.TrimSpace(rest)) != 0 {
+		err = errors.New("paste one public key at a time; use Manage SSH keys to add another")
+	}
 	if err != nil {
 		m.status = "Invalid public key: " + err.Error()
 		return nil
 	}
 	canonical := strings.TrimSpace(string(gossh.MarshalAuthorizedKey(key)))
 	fingerprint := gossh.FingerprintSHA256(key)
-	return m.mutate("users", "SSH key added.", "admin.gateway_key.add", map[string]any{"username": p.username, "fingerprint": fingerprint}, func() error { return m.store.AddGatewayKey(m.ctx, p.username, fingerprint, canonical, "") })
+	return m.mutate("users", "SSH key added.", "admin.gateway_key.add", map[string]any{"username": p.username, "fingerprint": fingerprint}, func() error { return m.store.AddGatewayKey(m.ctx, p.username, fingerprint, canonical, comment) })
 }
 
 func (m *Model) finishAgentKey() tea.Cmd {
@@ -1105,6 +1112,8 @@ func (m *Model) finishAgentKey() tea.Cmd {
 func (m *Model) finishDelete() tea.Cmd {
 	p := m.pending
 	switch p.kind {
+	case "user_key_remove":
+		return m.mutate("users", "SSH key removed.", "admin.gateway_key.remove", map[string]any{"username": p.username, "fingerprint": p.keyFingerprint}, func() error { return m.store.RemoveGatewayKey(m.ctx, p.username, p.keyFingerprint) })
 	case "target_delete":
 		return m.mutate("targets", "Target deleted.", "admin.target.delete", map[string]any{"target": p.target.Name}, func() error { return m.store.DeleteTarget(m.ctx, p.target.Name) })
 	case "user_delete":
@@ -1722,7 +1731,11 @@ func (m *Model) View() tea.View {
 		listHeight = 1
 	}
 	hasSelectableRows := len(rows) > 0
-	start, end := visibleRange(m.cursor, len(rows), listHeight)
+	rowCursor := m.cursor
+	if m.mode == "actions" || m.mode == "user_keys" || m.mode == "member_add" || m.mode == "member_remove" {
+		rowCursor = m.actionCursor
+	}
+	start, end := visibleRange(rowCursor, len(rows), listHeight)
 	label := title
 	if len(rows) > 0 && m.mode == "" {
 		label = fmt.Sprintf("%s  %d–%d of %d", title, start+1, end, len(rows))
@@ -1941,11 +1954,12 @@ func (m *Model) modalContent(inner int) (string, string, []string) {
 		}
 		rows = append(rows, "", green+"  Enter  Next / save"+reset+dim+"   •   Tab  Next field   •   ←/→  Change option"+reset)
 		return m.form.title, "  Fill in each field; values are validated before saving", rows
-	case "actions", "key_remove", "member_add", "member_remove":
+	case "actions", "user_keys", "member_add", "member_remove":
 		title := "Choose action"
 		context := "  Enter selects • Esc returns"
-		if m.mode == "key_remove" {
-			title = "Remove SSH key"
+		if m.mode == "user_keys" {
+			title = "SSH keys for " + m.pending.username
+			context = "  Add another key or select an existing key to remove • Esc returns"
 		} else if m.mode == "member_add" {
 			title = "Add group member"
 		} else if m.mode == "member_remove" {
@@ -1964,6 +1978,8 @@ func (m *Model) modalContent(inner int) (string, string, []string) {
 		name := "selected item"
 		if m.pending != nil {
 			switch m.pending.kind {
+			case "user_key_remove":
+				name = "SSH key " + m.pending.keyFingerprint + " for " + m.pending.username
 			case "target_delete":
 				name = "target " + m.pending.target.Name
 			case "user_delete":

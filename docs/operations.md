@@ -125,6 +125,21 @@ users keys remove USER SHA256:FINGERPRINT
 users totp remove USER
 ```
 
+Each user can have multiple gateway login keys. Adding a key appends it without
+replacing existing keys, and removing a key revokes only that key. In the TUI,
+open `USERS`, select a user, then choose `Manage SSH keys`. The screen lists
+keys by label and fingerprint, offers `Add another SSH key`, and asks for
+confirmation before removing a selected key. Paste one public key per addition;
+its trailing OpenSSH comment is kept as the label.
+
+For example, register separate laptop and desktop keys from the CLI:
+
+```sh
+sshgatew users keys add alice --file laptop.pub --label laptop
+sshgatew users keys add alice --file desktop.pub --label desktop
+sshgatew users keys list alice
+```
+
 SSHGateW prevents removal of the final enabled administrator with a usable
 gateway key. A public key may be assigned to multiple users because login
 matching includes both the claimed SSH username and key fingerprint. Assigning
