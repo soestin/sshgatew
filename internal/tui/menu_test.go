@@ -426,7 +426,8 @@ func TestAdminMenusManageUsersGroupsKeysAndGrants(t *testing.T) {
 		}
 	}
 	m.handleKey("enter")
-	m.handleKey("enter") // Add SSH key
+	m.handleKey("enter") // Manage SSH keys
+	m.handleKey("enter") // Add another SSH key
 	m.Update(tea.PasteMsg{Content: strings.TrimSpace(string(gossh.MarshalAuthorizedKey(gatewayKey)))})
 	applyCommand(m, m.handleKey("enter"))
 	keys, err := st.ListGatewayKeys(context.Background(), "alice")
@@ -516,5 +517,121 @@ func TestSelfServiceAndAdminOIDCMapping(t *testing.T) {
 func typeKeys(m *Model, value string) {
 	for _, r := range value {
 		m.handleKey(string(r))
+	}
+}
+
+func TestManageMultipleUserSSHKeys(t *testing.T) {
+	m, st := testModel(t)
+	m.Update(m.load())
+	m.section = "users"
+	m.openSelectedActions()
+	if m.actions[0].code != "user_keys" {
+		t.Fatal("missing SSH key manager")
+	}
+	m.handleActionKey("enter")
+	if m.mode != "user_keys" || len(m.actions) != 2 {
+		t.Fatalf("initial key manager: mode=%s actions=%v", m.mode, m.actions)
+	}
+	m.handleActionKey("enter")
+	if m.mode != "public_key" {
+		t.Fatal("add key did not open input")
+	}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := gossh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.input = strings.TrimSpace(string(gossh.MarshalAuthorizedKey(key))) + " laptop"
+	cmd := m.handleModeKey("enter")
+	if cmd == nil {
+		t.Fatalf("key rejected: %s", m.status)
+	}
+	msg := cmd().(mutationMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	m.Update(msg)
+	keys, err := st.ListGatewayKeys(m.ctx, "admin")
+	if err != nil || len(keys) != 2 || keys[1].Label != "laptop" {
+		t.Fatalf("keys=%v err=%v", keys, err)
+	}
+	for _, k := range keys {
+		if _, err = st.AuthenticateKey(m.ctx, "admin", k.Fingerprint); err != nil {
+			t.Fatalf("registered key cannot authenticate: %v", err)
+		}
+	}
+	m.openSelectedActions()
+	m.handleActionKey("enter")
+	if len(m.actions) != 3 || !strings.Contains(m.actions[2].label, "laptop") {
+		t.Fatalf("missing labeled second key: %v", m.actions)
+	}
+	m.handleActionKey("end")
+	m.handleActionKey("enter")
+	if m.mode != "confirm_delete" || m.pending.keyFingerprint != keys[1].Fingerprint {
+		t.Fatal("removal did not select the second key for confirmation")
+	}
+	msg = m.handleModeKey("y")().(mutationMsg)
+	if msg.err != nil {
+		t.Fatal(msg.err)
+	}
+	if _, err = st.AuthenticateKey(m.ctx, "admin", keys[1].Fingerprint); err == nil {
+		t.Fatal("removed key still authenticates")
+	}
+	if _, err = st.AuthenticateKey(m.ctx, "admin", keys[0].Fingerprint); err != nil {
+		t.Fatalf("removing second key broke original key: %v", err)
+	}
+	if err = st.RemoveGatewayKey(m.ctx, "admin", keys[0].Fingerprint); err == nil {
+		t.Fatal("allowed removal of final administrator key")
+	}
+}
+
+func TestUserKeyInputRejectsMultipleKeysWithoutSaving(t *testing.T) {
+	m, st := testModel(t)
+	m.pending = &pendingOperation{username: "admin"}
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := gossh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.input = strings.Repeat(string(gossh.MarshalAuthorizedKey(key)), 2)
+	if cmd := m.finishPublicKey(); cmd != nil || !strings.Contains(m.status, "one public key at a time") {
+		t.Fatalf("multiple keys were silently accepted: %s", m.status)
+	}
+	keys, err := st.ListGatewayKeys(m.ctx, "admin")
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("keys changed on invalid input: %v %v", keys, err)
+	}
+}
+
+func TestUserKeyManagerEmptyAndScrolling(t *testing.T) {
+	m, st := testModel(t)
+	if _, err := st.AddUser(m.ctx, "alice", store.RoleMember); err != nil {
+		t.Fatal(err)
+	}
+	m.pending = &pendingOperation{username: "alice"}
+	m.dispatchAction("user_keys")
+	if len(m.actions) != 1 || m.actions[0].code != "user_key_add" {
+		t.Fatalf("empty user cannot add a first key: %v", m.actions)
+	}
+	for i := 0; i < 30; i++ {
+		if err := st.AddGatewayKey(m.ctx, "alice", fmt.Sprintf("SHA256:key%02d", i), "key", fmt.Sprintf("device-%02d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.dispatchAction("user_keys")
+	m.width, m.height = 80, 24
+	m.handleActionKey("end")
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "device-29") {
+		t.Fatalf("selected key is outside viewport:\n%s", view)
+	}
+	m.handleActionKey("home")
+	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "Add another SSH key") {
+		t.Fatalf("cannot scroll back to add key:\n%s", view)
 	}
 }

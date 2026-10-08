@@ -13,7 +13,7 @@ encrypted at rest.
 
 ## Current features
 
-- Public-key authentication to the gateway on port 2222 by default.
+- Public-key authentication to the gateway on port 2222 by default, with multiple keys per user.
 - Optional OIDC device-flow authentication with signed ID-token validation.
 - Optional per-user TOTP second-factor authentication with terminal QR enrollment.
 - Member and administrator terminal interfaces.
@@ -182,6 +182,12 @@ Connect with:
 ```sh
 ssh -p 2222 admin@gateway.example.com
 ```
+
+Administrators can register multiple gateway login keys for each user. Open
+`USERS`, select the user, and choose `Manage SSH keys` → `Add another SSH key`.
+Repeat for each device; existing keys continue to work. Key comments (such as
+`alice@laptop`) are saved as labels. The same screen lists all registered keys
+and lets you select a specific key for removal.
 
 Users with TOTP enabled are shown a hidden six-digit challenge after their SSH
 key is accepted and before the gateway menu opens. Administrators can enroll or
