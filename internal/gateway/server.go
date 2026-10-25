@@ -122,6 +122,7 @@ func (s *Server) handle(sess charmssh.Session) {
 		return
 	}
 	defer s.release(u)
+	sess = newInteractiveSession(sess)
 	_ = s.store.Audit(sess.Context(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "gateway.session.start", Outcome: "success"})
 	defer s.store.Audit(context.Background(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "gateway.session.end", Outcome: "success"})
 	status := ""

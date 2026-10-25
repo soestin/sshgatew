@@ -186,6 +186,92 @@ func TestRoutedShellSFTPAndTCPForwarding(t *testing.T) {
 	if !strings.Contains(shellOut.String(), "routed-shell-ok") {
 		t.Fatalf("shell output=%q", shellOut.String())
 	}
+	t.Run("return to menu and switch devices repeatedly", func(t *testing.T) {
+		other, err := st.AddTarget(context.Background(), store.NewTarget{Name: "second", Host: targetHost, Port: targetPort, RemoteUsername: "root", CredentialKind: store.CredentialPassword, HostKeyAlgorithm: targetHostKey.Type(), HostPublicKey: strings.TrimSpace(string(gossh.MarshalAuthorizedKey(targetHostKey)))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		nonce, ciphertext, err := cipher.Encrypt(other.ID, store.CredentialPassword, secrets.Payload{Password: "downstream-secret"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetTargetCredential(context.Background(), other.ID, nonce, ciphertext); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.SetGrantCapabilities(context.Background(), other.Name, "user", user.Username, true, true, false, false, false); err != nil {
+			t.Fatal(err)
+		}
+		menuCfg := *clientCfg
+		menuCfg.User = "alice"
+		menuClient, err := gossh.Dial("tcp", cfg.ListenAddress, &menuCfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer menuClient.Close()
+		menu, err := menuClient.NewSession()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer menu.Close()
+		if err := menu.RequestPty("xterm", 24, 100, gossh.TerminalModes{}); err != nil {
+			t.Fatal(err)
+		}
+		input, err := menu.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var output lockedBuffer
+		menu.Stdout, menu.Stderr = &output, &output
+		if err := menu.Shell(); err != nil {
+			t.Fatal(err)
+		}
+		waitFor := func(fragment string, count int) {
+			t.Helper()
+			deadline := time.Now().Add(3 * time.Second)
+			for time.Now().Before(deadline) {
+				if strings.Count(output.String(), fragment) >= count {
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			t.Fatalf("did not receive %q %d times: %q", fragment, count, output.String())
+		}
+		waitFor("Connection profiles", 1)
+		for i, keys := range []string{"\r", "j\r", "\r"} {
+			if _, err := io.WriteString(input, keys); err != nil {
+				t.Fatal(err)
+			}
+			waitFor("routed-shell-ok", i+1)
+			expected := "Disconnected from prod"
+			if i == 1 {
+				expected = "Disconnected from second"
+			}
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				text := output.String()
+				if strings.Contains(text[strings.LastIndex(text, "routed-shell-ok"):], expected) {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("did not return from expected device %q: %q", expected, text)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		if _, err := io.WriteString(input, "q"); err != nil {
+			t.Fatal(err)
+		}
+		finished := make(chan error, 1)
+		go func() { finished <- menu.Wait() }()
+		select {
+		case err := <-finished:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("gateway did not exit after returning from devices")
+		}
+	})
 	sftp, err := client.NewSession()
 	if err != nil {
 		t.Fatal(err)

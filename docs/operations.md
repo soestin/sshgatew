@@ -1,5 +1,19 @@
 # Operator guide
 
+## Switching devices
+
+Connect without a `+TARGET` suffix to use the gateway menu. Run `exit` or press
+Ctrl+D in a device shell to return to that menu, then select another device or
+reopen the previous one. Exiting a nested shell returns to its parent shell
+first. The gateway login remains open until you quit the menu or disconnect.
+Reopening a device starts a new shell; use a terminal multiplexer on the device
+if you need to preserve running programs after exiting its shell.
+
+Downstream connections send SSH keepalives every 30 seconds. A failed request
+or a reply taking longer than 10 seconds closes the stalled connection and
+returns control to the gateway. The configured gateway idle timeout still
+applies.
+
 ## Docker Compose
 
 The repository includes `compose.yaml` and a multi-stage `Dockerfile`. Copy an
