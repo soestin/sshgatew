@@ -35,9 +35,19 @@ func persistentGateway(t *testing.T, terminalLimit ...int) *persistentFixture {
 		id := f.starts.Add(1)
 		fmt.Fprintf(ch, "instance:%d ready\r\n", id)
 		state := ""
-		scanner := bufio.NewScanner(ch)
-		for scanner.Scan() {
-			switch line := scanner.Text(); {
+		reader := bufio.NewReader(ch)
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimSuffix(line, "\n")
+			switch {
+			case line == "expect-escape":
+				fmt.Fprint(ch, "waiting-for-escape\r\n")
+				if key, err := reader.ReadByte(); err == nil && key == 27 {
+					fmt.Fprint(ch, "escape-received\r\n")
+				}
 			case strings.HasPrefix(line, "set "):
 				state = strings.TrimPrefix(line, "set ")
 				fmt.Fprintf(ch, "stored:%s\r\n", state)
@@ -263,6 +273,8 @@ func TestPersistentTerminalScreenRestoreAndRevocation(t *testing.T) {
 	f := persistentGateway(t)
 	a := f.login(t, "alice")
 	a.send(t, "\r", "instance:1 ready")
+	a.send(t, "expect-escape\n", "waiting-for-escape")
+	a.send(t, "\x1b", "escape-received")
 	a.send(t, "screen\n", "editor-screen")
 	a.send(t, "\x1d", "Detached from alpha")
 	output := a.send(t, "\r", "editor-screen")
