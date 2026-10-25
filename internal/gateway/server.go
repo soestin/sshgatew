@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"sync"
-	"time"
 
 	charmssh "github.com/charmbracelet/ssh"
 	gossh "golang.org/x/crypto/ssh"
@@ -22,16 +21,19 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	store     *store.Store
-	cipher    *secrets.Cipher
-	connector downstream.Connector
-	ssh       *charmssh.Server
-	log       *slog.Logger
-	oidc      oidcAuthenticator
-	mu        sync.Mutex
-	total     int
-	perUser   map[int64]int
+	cfg              config.Config
+	store            *store.Store
+	cipher           *secrets.Cipher
+	connector        downstream.Connector
+	ssh              *charmssh.Server
+	log              *slog.Logger
+	oidc             oidcAuthenticator
+	mu               sync.Mutex
+	total            int
+	perUser          map[int64]int
+	terminals        map[terminalKey]*terminalEntry
+	terminalsStopped bool
+	terminalWG       sync.WaitGroup
 }
 
 type oidcAuthenticator interface {
@@ -67,8 +69,19 @@ func New(cfg config.Config, st *store.Store, cipher *secrets.Cipher, log *slog.L
 	return s, nil
 }
 
-func (s *Server) ListenAndServe() error              { return s.ssh.ListenAndServe() }
-func (s *Server) Shutdown(ctx context.Context) error { return s.ssh.Shutdown(ctx) }
+func (s *Server) ListenAndServe() error { return s.ssh.ListenAndServe() }
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.stopTerminals()
+	err := s.ssh.Shutdown(ctx)
+	done := make(chan struct{})
+	go func() { s.terminalWG.Wait(); close(done) }()
+	select {
+	case <-done:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func nullableUserID(u store.User, err error) *int64 {
 	if err != nil {
@@ -125,10 +138,16 @@ func (s *Server) handle(sess charmssh.Session) {
 	sess = newInteractiveSession(sess)
 	_ = s.store.Audit(sess.Context(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "gateway.session.start", Outcome: "success"})
 	defer s.store.Audit(context.Background(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "gateway.session.end", Outcome: "success"})
-	status := ""
+	status := "Ctrl+] detaches a terminal. Select a detached device to resume it."
 	for {
 		pty, windows, _ := sess.Pty()
+		current, userErr := s.store.UserByID(sess.Context(), u.ID)
+		if userErr != nil || !current.Enabled {
+			return
+		}
+		u = current
 		m := tui.New(sess.Context(), s.store, s.cipher, s.cfg.DownstreamTimeout.Value(), sess.RemoteAddr().String(), u, status)
+		m.ConfigureTerminals(func() map[int64]string { return s.terminalStates(u.ID) })
 		if s.oidc != nil {
 			m.ConfigureOIDC(s.oidc, s.cfg.OIDC.IssuerURL, s.cfg.OIDC.LoginTimeout.Value(), state.AuthMethod == "publickey")
 		}
@@ -142,6 +161,19 @@ func (s *Server) handle(sess charmssh.Session) {
 		if result.Quit {
 			return
 		}
+		current, userErr = s.store.UserByID(sess.Context(), u.ID)
+		if userErr != nil || !current.Enabled {
+			return
+		}
+		u = current
+		if result.CloseTerminal {
+			if s.closeTerminal(u.ID, result.TargetID) {
+				status = "Session closed."
+			} else {
+				status = "No running session for this device."
+			}
+			continue
+		}
 		if !s.store.CanAccess(sess.Context(), u, result.TargetID) {
 			status = "Access was revoked or the target is disabled."
 			continue
@@ -151,37 +183,7 @@ func (s *Server) handle(sess charmssh.Session) {
 			status = "Target no longer exists."
 			continue
 		}
-		start := time.Now()
-		_ = s.store.Audit(sess.Context(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "target.connect.start", TargetID: &target.ID, Outcome: "success"})
-		var credential secrets.Payload
-		if target.CredentialKind == store.CredentialStoredKey {
-			if target.IdentityID == nil {
-				err = errors.New("stored SSH key reference is missing")
-			} else {
-				var identity store.SSHIdentity
-				identity, err = s.store.SSHIdentityByID(sess.Context(), *target.IdentityID)
-				if err == nil {
-					credential, err = s.cipher.DecryptSSHIdentity(identity.ID, identity.Nonce, identity.Ciphertext)
-				}
-			}
-		} else {
-			credential, err = s.cipher.Decrypt(target.ID, target.CredentialKind, target.Nonce, target.Ciphertext)
-		}
-		var forwarded *downstream.AgentConnection
-		if err == nil && target.CredentialKind == store.CredentialAgent {
-			forwarded, err = downstream.OpenForwardedAgent(sess)
-		}
-		if err == nil {
-			err = s.connector.Connect(sess.Context(), sess, windows, target, credential, forwarded)
-		}
-		outcome := "success"
-		if err != nil {
-			outcome = "failure"
-			status = "Connection ended: " + sanitize(err.Error())
-		} else {
-			status = "Disconnected from " + target.Name
-		}
-		_ = s.store.Audit(context.Background(), store.AuditEvent{ActorUserID: &u.ID, ClaimedUsername: u.Username, SourceAddress: sess.RemoteAddr().String(), EventType: "target.connect.end", TargetID: &target.ID, Outcome: outcome, Details: jsonString(map[string]any{"duration_ms": time.Since(start).Milliseconds(), "error": sanitizeError(err)})})
+		status = s.runTerminal(sess, u, target, windows)
 	}
 }
 
