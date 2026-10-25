@@ -253,6 +253,7 @@ func (t *Terminal) Attach(ctx context.Context, inbound charmssh.Session, input T
 	defer ticker.Stop()
 	dirty := false
 	var pending []byte
+	var pendingSince time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -263,6 +264,14 @@ func (t *Terminal) Attach(ctx context.Context, inbound charmssh.Session, input T
 		case <-t.changed:
 			dirty = true
 		case <-ticker.C:
+			// A lone Escape must reach editors even if no further key arrives.
+			// Only hold it briefly to recognize a fragmented extended Ctrl+].
+			if len(pending) > 0 && time.Since(pendingSince) >= 50*time.Millisecond {
+				if err := t.Send(pending); err != nil {
+					return false, err
+				}
+				pending = nil
+			}
 			if dirty {
 				if _, err := io.WriteString(inbound, t.snapshot()); err != nil {
 					return true, err
@@ -291,6 +300,7 @@ func (t *Terminal) Attach(ctx context.Context, inbound charmssh.Session, input T
 				}
 			}
 			pending = rest
+			pendingSince = time.Now()
 			if detach {
 				input.PrependInput(tail)
 				return true, nil
