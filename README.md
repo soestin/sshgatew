@@ -25,11 +25,9 @@ encrypted at rest.
 - SQLite persistence, metadata auditing, session limits, and JSON logs.
 - Routed `user+target` logins for direct shells, SFTP, SCP, and restricted local forwarding.
 - Return to the gateway menu after a device shell exits and switch devices within the same login.
-- Persistent per-user device terminals: Ctrl+] detaches, Enter resumes, and x closes a session.
-- Resume the same shell after reconnecting to the gateway, including from another computer.
 - Downstream SSH keepalives detect stalled connections and keep idle transports active.
 - Exact per-target TCP destination allowlists; reverse forwarding remains disabled.
-- No arbitrary remote exec, downstream agent exposure, or terminal recording on disk.
+- No arbitrary remote exec, downstream agent exposure, or terminal recording.
 
 ## Build
 

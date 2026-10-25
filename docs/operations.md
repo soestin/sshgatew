@@ -2,50 +2,17 @@
 
 ## Switching devices
 
-Connect without a `+TARGET` suffix to use the gateway menu:
-
-```sh
-ssh -p 2222 YOUR_USERNAME@gateway.example.com
-```
-
-Press Enter to open a device. While in its terminal, press **Ctrl+]** to detach
-and return to the device menu. Its shell, current directory, variables, running
-commands, and nested shells or SSH connections stay alive. Open another device,
-detach again, and select the previous device to resume its existing terminal.
-The menu labels your sessions `DETACHED` or `ATTACHED`. Press `r` to refresh.
-
-Quitting the menu with `q`, losing your connection, or logging in from another
-computer does not close these terminals. Log back in with the same gateway
-account and select the device to resume. Each account has one terminal per
-device; other accounts have independent terminals. Only one login can control
-a terminal at a time. Detach the current controller before resuming elsewhere,
-or select the device and press `x`, then `y`, to close your existing session.
-
-Run `exit` or press Ctrl+D to close a shell. Exiting a nested shell returns to
-its parent first; exiting the main device shell ends that terminal and returns
-to the menu. Selecting that device again creates a fresh shell.
-
-Terminals survive client disconnects, but end on gateway shutdown/restart,
-device reboot, or a downstream connection failure. No downstream `tmux`
-installation is needed. The gateway keeps the current terminal screen in RAM,
-including alternate-screen applications, at up to 300 columns by 100 rows.
-It does not store terminal transcripts or retain unlimited scrollback.
-
-`max_sessions` and `max_sessions_per_user` bound the retained terminal pool
-(including detached terminals) independently of the inbound login limits.
-At the terminal limit you can still log in, resume a terminal, or close one.
-Detached terminals have no automatic expiry; explicitly close sessions you
-no longer need. Authorization is checked again before resuming and every
-five seconds while a terminal exists. Revocation, user/target disabling, or
-changes to the device address, remote username, or pinned host key close it.
-
-Routed `USER+TARGET` logins keep their direct, nonpersistent behavior and do
-not open or resume menu-managed terminals. SFTP/SCP and forwarding are unchanged.
+Connect without a `+TARGET` suffix to use the gateway menu. Run `exit` or press
+Ctrl+D in a device shell to return to that menu, then select another device or
+reopen the previous one. Exiting a nested shell returns to its parent shell
+first. The gateway login remains open until you quit the menu or disconnect.
+Reopening a device starts a new shell; use a terminal multiplexer on the device
+if you need to preserve running programs after exiting its shell.
 
 Downstream connections send SSH keepalives every 30 seconds. A failed request
 or a reply taking longer than 10 seconds closes the stalled connection and
 returns control to the gateway. The configured gateway idle timeout still
-applies to the inbound login; its expiry detaches a persistent terminal.
+applies.
 
 ## Docker Compose
 
@@ -73,18 +40,6 @@ cp .env.example .env
 Use `docker compose down` to stop the service. Do not add `--volumes` unless
 you intend to destroy the installation; deleting either named volume can make
 the encrypted credentials unavailable or inconsistent.
-
-When deploying through SSHGateW itself, detach the deployment process from
-the SSH session before restarting the gateway. Otherwise the restart can
-interrupt Compose before it starts the replacement container:
-
-```sh
-nohup sh -c 'docker compose pull && docker compose up -d --no-build' \
-  > /root/sshgatew-deploy.log 2>&1 < /dev/null &
-```
-
-Run this from your deployment directory, then reconnect and check the log and
-`docker compose ps`. Restarting the gateway ends its retained terminals.
 
 ## Single-binary bootstrap
 

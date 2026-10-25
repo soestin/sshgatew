@@ -78,29 +78,6 @@ func TestHelpDoesNotMutate(t *testing.T) {
 	}
 }
 
-func TestPersistentTerminalStatusAndCloseConfirmation(t *testing.T) {
-	m, _ := testModel(t)
-	m.user.Role = store.RoleMember
-	m.targets = []store.Target{{ID: 7, Name: "alpha", Enabled: true}}
-	m.ConfigureTerminals(func() map[int64]string { return map[int64]string{7: "DETACHED"} })
-	if !strings.Contains(m.View().Content, "DETACHED") {
-		t.Fatal("detached session is not visible")
-	}
-	m.handleKey("x")
-	if m.result != nil || m.mode != "confirm_terminal_close" {
-		t.Fatal("closing did not require confirmation")
-	}
-	m.handleKey("n")
-	if m.result != nil || m.mode != "" {
-		t.Fatal("canceling closed a session")
-	}
-	m.handleKey("x")
-	m.handleKey("y")
-	if m.result == nil || !m.result.CloseTerminal || m.result.TargetID != 7 {
-		t.Fatalf("unexpected close action: %+v", m.result)
-	}
-}
-
 func TestViewStaysInsideTerminal(t *testing.T) {
 	m, _ := testModel(t)
 	for i := 0; i < 80; i++ {
