@@ -27,9 +27,10 @@ import (
 )
 
 type Result struct {
-	TargetID int64
-	Quit     bool
-	Verified bool
+	TargetID      int64
+	CloseTerminal bool
+	Quit          bool
+	Verified      bool
 }
 
 type OIDCAuthenticator interface {
@@ -100,7 +101,10 @@ type Model struct {
 	actions               []actionItem
 	actionCursor          int
 	totpAttempts          int
+	terminalStates        func() map[int64]string
 }
+
+func (m *Model) ConfigureTerminals(states func() map[int64]string) { m.terminalStates = states }
 
 func New(ctx context.Context, s *store.Store, cipher *secrets.Cipher, timeout time.Duration, sourceAddress string, u store.User, status string) *Model {
 	return &Model{ctx: ctx, store: s, cipher: cipher, timeout: timeout, sourceAddress: sourceAddress, user: u, status: status, section: "targets"}
@@ -301,6 +305,19 @@ func (m *Model) handleKey(key string) tea.Cmd {
 	if key == "o" {
 		return m.startOIDCLink()
 	}
+	if key == "r" {
+		return m.load
+	}
+	if key == "x" && m.section == "targets" && m.terminalStates != nil {
+		targets := m.filtered()
+		if len(targets) > 0 && m.terminalStates()[targets[m.cursor].ID] != "" {
+			m.pending = &pendingOperation{target: targets[m.cursor]}
+			m.mode = "confirm_terminal_close"
+		} else {
+			m.status = "No running session for this device."
+		}
+		return nil
+	}
 	if m.user.Role == store.RoleAdmin {
 		switch key {
 		case "1":
@@ -384,6 +401,16 @@ func (m *Model) handleKey(key string) tea.Cmd {
 	return nil
 }
 func (m *Model) handleModeKey(key string) tea.Cmd {
+	if m.mode == "confirm_terminal_close" {
+		if key == "y" {
+			m.result = &Result{TargetID: m.pending.target.ID, CloseTerminal: true}
+			return tea.Quit
+		}
+		if key == "n" || key == "esc" {
+			m.closeModal("Cancelled.")
+		}
+		return nil
+	}
 	if m.mode == "help" {
 		m.mode = ""
 		return nil
@@ -1913,12 +1940,20 @@ func (m *Model) content(inner int) (string, string, []string) {
 		}
 		return "Recent audit events", dim + "  Newest first • metadata only" + reset, rows
 	default:
+		states := map[int64]string{}
+		if m.terminalStates != nil {
+			states = m.terminalStates()
+		}
 		for _, t := range m.filtered() {
 			state := ""
 			if !t.Enabled {
 				state = red + "  DISABLED" + reset
 			}
-			rows = append(rows, fmt.Sprintf("  %-20s  %-15s  %s@%s:%d%s", t.Name, t.CredentialKind, t.RemoteUsername, t.Host, t.Port, state))
+			label := t.CredentialKind
+			if states[t.ID] != "" {
+				label = states[t.ID]
+			}
+			rows = append(rows, fmt.Sprintf("  %-20s  %-15s  %s@%s:%d%s", t.Name, label, t.RemoteUsername, t.Host, t.Port, state))
 		}
 		prompt := "  / Search profiles"
 		if m.searching {
@@ -1932,8 +1967,10 @@ func (m *Model) content(inner int) (string, string, []string) {
 
 func (m *Model) modalContent(inner int) (string, string, []string) {
 	switch m.mode {
+	case "confirm_terminal_close":
+		return "Close session", "  y close session • n/Esc cancel", []string{"  Close your terminal on " + m.pending.target.Name + "?", "  This ends its shell, including any nested sessions.", "  Running programs may be terminated."}
 	case "help":
-		return "Keyboard help", "  Press any key to return", []string{"  ↑/↓ or j/k     Move selection", "  Enter          Connect/manage selected item", "  a              Add item in current section", "  m              Manage selected item", "  o              Link my OIDC account (key login)", "  Tab            Move through form fields", "  ←/→            Change option or section", "  /              Search targets", "  1–7            Change admin section", "  r              Refresh data", "  q              Disconnect from SSHGateW"}
+		return "Keyboard help", "  Press any key to return", []string{"  ↑/↓ or j/k     Move selection", "  Enter          Open/resume selected terminal", "  Ctrl+]         Detach while inside a terminal", "  x              Close my selected device session", "  a              Add item in current section", "  m              Manage selected item", "  o              Link my OIDC account (key login)", "  Tab            Move through form fields", "  ←/→            Change option or section", "  /              Search targets", "  1–7            Change admin section", "  r              Refresh data", "  q              Disconnect (terminals keep running)"}
 	case "form":
 		if m.form == nil {
 			return "Form", "  Esc cancels", nil
@@ -2094,6 +2131,9 @@ func (m *Model) footer() string {
 		default:
 			actions = "  ↑↓ navigate  •  ←→ tabs  •  r refresh  •  ? help  •  q quit"
 		}
+	}
+	if m.section == "targets" && m.terminalStates != nil {
+		actions = "  Enter open/resume • x close session • r refresh • ? help • q quit"
 	}
 	return dim + actions + reset
 }

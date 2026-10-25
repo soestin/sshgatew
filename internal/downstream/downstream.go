@@ -118,11 +118,17 @@ func (c Connector) Dial(ctx context.Context, t store.Target, credential secrets.
 	if err != nil {
 		return nil, fmt.Errorf("dial downstream: %w", err)
 	}
+	if c.Timeout > 0 {
+		_ = raw.SetDeadline(time.Now().Add(c.Timeout))
+	}
+	stopHandshake := context.AfterFunc(ctx, func() { _ = raw.Close() })
 	cc, chans, reqs, err := gossh.NewClientConn(raw, addr, cfg)
+	stopHandshake()
 	if err != nil {
 		raw.Close()
 		return nil, fmt.Errorf("downstream handshake: %w", err)
 	}
+	_ = raw.SetDeadline(time.Time{})
 	// The forwarded agent is used only for the authentication handshake. It is
 	// deliberately not exposed to the downstream shell.
 	if forwarded != nil {

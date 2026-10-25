@@ -18,7 +18,7 @@ import (
 	"sshgatew/internal/store"
 )
 
-func startProtocolTarget(t *testing.T) (string, gossh.PublicKey) {
+func startProtocolTarget(t *testing.T, shellHandler ...func(gossh.Channel)) (string, gossh.PublicKey) {
 	t.Helper()
 	host := signer(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -62,6 +62,12 @@ func startProtocolTarget(t *testing.T) (string, gossh.PublicKey) {
 									_ = req.Reply(true, nil)
 								case "shell":
 									_ = req.Reply(true, nil)
+									if len(shellHandler) > 0 {
+										go gossh.DiscardRequests(requests)
+										shellHandler[0](ch)
+										_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{0}))
+										return
+									}
 									_, _ = io.WriteString(ch, "routed-shell-ok\n")
 									_, _ = ch.SendRequest("exit-status", false, gossh.Marshal(struct{ Status uint32 }{0}))
 									return
