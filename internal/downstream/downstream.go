@@ -128,7 +128,42 @@ func (c Connector) Dial(ctx context.Context, t store.Target, credential secrets.
 	if forwarded != nil {
 		_ = forwarded.Close()
 	}
-	return gossh.NewClient(cc, chans, reqs), nil
+	client := gossh.NewClient(cc, chans, reqs)
+	go keepAlive(client, 30*time.Second, 10*time.Second)
+	return client, nil
+}
+
+// Any reply, including an unsupported-request reply, proves the peer is alive.
+// Close a stalled connection so shells and their input workers can finish.
+func keepAlive(client *gossh.Client, interval, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() { _ = client.Wait(); close(done) }()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			reply := make(chan error, 1)
+			go func() { _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); reply <- err }()
+			timer := time.NewTimer(timeout)
+			select {
+			case <-done:
+				timer.Stop()
+				return
+			case err := <-reply:
+				timer.Stop()
+				if err != nil {
+					_ = client.Close()
+					return
+				}
+			case <-timer.C:
+				_ = client.Close()
+				return
+			}
+		}
+	}
 }
 
 func ProxyShell(ctx context.Context, client *gossh.Client, inbound charmssh.Session, windows <-chan charmssh.Window) error {
@@ -145,7 +180,39 @@ func ProxyShell(ctx context.Context, client *gossh.Client, inbound charmssh.Sess
 	if err = sess.RequestPty(pty.Term, pty.Window.Height, pty.Window.Width, modes); err != nil {
 		return fmt.Errorf("request downstream PTY: %w", err)
 	}
-	sess.Stdin = inbound
+	// Do not let the SSH library start an uncancelable copy from the gateway
+	// channel: that reader would survive shell exit and consume menu input.
+	var inputDone chan struct{}
+	inputCtx, cancelInput := context.WithCancel(ctx)
+	defer cancelInput()
+	if reader, ok := inbound.(interface {
+		ReadContext(context.Context, []byte) (int, error)
+	}); ok {
+		stdin, pipeErr := sess.StdinPipe()
+		if pipeErr != nil {
+			return pipeErr
+		}
+		inputDone = make(chan struct{})
+		defer func() { cancelInput(); _ = sess.Close(); <-inputDone }()
+		go func() {
+			defer close(inputDone)
+			defer stdin.Close()
+			buf := make([]byte, 4096)
+			for {
+				n, readErr := reader.ReadContext(inputCtx, buf)
+				if n > 0 {
+					if _, writeErr := stdin.Write(buf[:n]); writeErr != nil {
+						return
+					}
+				}
+				if readErr != nil {
+					return
+				}
+			}
+		}()
+	} else {
+		sess.Stdin = inbound
+	}
 	sess.Stdout = inbound
 	sess.Stderr = inbound
 	if err = sess.Shell(); err != nil {

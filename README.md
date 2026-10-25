@@ -24,12 +24,14 @@ encrypted at rest.
 - XChaCha20-Poly1305 encrypted credentials with a separate master-key file.
 - SQLite persistence, metadata auditing, session limits, and JSON logs.
 - Routed `user+target` logins for direct shells, SFTP, SCP, and restricted local forwarding.
+- Return to the gateway menu after a device shell exits and switch devices within the same login.
+- Downstream SSH keepalives detect stalled connections and keep idle transports active.
 - Exact per-target TCP destination allowlists; reverse forwarding remains disabled.
 - No arbitrary remote exec, downstream agent exposure, or terminal recording.
 
 ## Build
 
-Go 1.26 or newer is required.
+Go 1.26.10 or newer is required.
 
 ```sh
 make build VERSION=0.1.0
