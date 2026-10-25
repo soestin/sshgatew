@@ -21,13 +21,7 @@ downstream credential it manages. Harden and monitor the host accordingly.
   shells, and forwarding connections that never open the gateway menu. A code
   counter cannot be reused.
 - Authorization is checked when listing targets and again immediately before a
-  downstream connection or terminal resume. Persistent terminals are keyed by
-  gateway user ID and target ID, never by the shared downstream username.
-- Only one login can control a persistent terminal. Attached and detached
-  terminals are checked every five seconds against the current user and shell
-  grant. Revocation, disabling, deletion, or changes to the address, remote
-  username, or pinned host key close the terminal. No session is transferred
-  between gateway accounts.
+  downstream connection.
 - Downstream host public keys are pinned exactly. Unknown and changed keys fail
   before downstream authentication completes.
 - Credential payloads use XChaCha20-Poly1305 with random nonces and associated
@@ -37,12 +31,6 @@ downstream credential it manages. Harden and monitor the host accordingly.
   no group/world permission bits. The SQLite database is mode 0600.
 - Passwords, private keys, passphrases, terminal contents, and downstream
   commands are excluded from logs and audit records.
-- Persistent terminals retain a bounded current screen in process memory to
-  restore it on attachment; no transcript is stored in SQLite or on disk.
-  Screens may contain sensitive output, just like an attached terminal. A
-  process restart destroys all retained screens and downstream sessions.
-  The retained terminal pool has independent global/per-user limits using
-  `max_sessions` and `max_sessions_per_user`, including detached terminals.
 - TOTP seeds are encrypted under the master key with associated data binding
   each seed to its user ID. Seeds and submitted codes are never logged or
   included in audit metadata.

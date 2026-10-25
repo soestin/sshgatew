@@ -45,10 +45,6 @@ func (s *interactiveSession) Read(p []byte) (int, error) {
 	return s.ReadContext(s.Context(), p)
 }
 
-func (s *interactiveSession) PrependInput(p []byte) {
-	s.pending = append(append([]byte(nil), p...), s.pending...)
-}
-
 // ReadContext has one consumer at a time; each shell joins its input worker
 // before handing the session back to the menu.
 func (s *interactiveSession) ReadContext(ctx context.Context, p []byte) (int, error) {
