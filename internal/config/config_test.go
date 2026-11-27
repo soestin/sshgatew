@@ -97,3 +97,36 @@ func TestEmptyOIDCEnvironmentDoesNotOverrideTOML(t *testing.T) {
 		t.Fatalf("empty environment changed TOML configuration: %#v", got.OIDC)
 	}
 }
+
+func TestTrustedUserCAConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	want := Default()
+	want.TrustedUserCAKeys = "/etc/sshgatew/ca.pub"
+	if err := Write(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil || got.TrustedUserCAKeys != want.TrustedUserCAKeys {
+		t.Fatalf("CA config roundtrip: %v", err)
+	}
+	t.Setenv("SSHGATEW_TRUSTED_USER_CA_KEYS", "/other/ca.pub")
+	got, err = Load(path)
+	if err != nil || got.TrustedUserCAKeys != "/other/ca.pub" {
+		t.Fatalf("CA environment override: %v", err)
+	}
+}
+
+func TestCertificateUsernameAliasValidation(t *testing.T) {
+	for _, mapping := range []map[string]string{{"": "alice"}, {"web": ""}, {"web": "web"}, {"web+prod": "alice"}, {"WEB": "alice"}, {"web": "Alice"}, {"web": "a/b"}} {
+		c := Default()
+		c.CertificateUsernameAliases = mapping
+		if err := c.Validate(); err == nil {
+			t.Fatalf("accepted invalid aliases %v", mapping)
+		}
+	}
+	c := Default()
+	c.CertificateUsernameAliases = map[string]string{"web-alice": "alice"}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}

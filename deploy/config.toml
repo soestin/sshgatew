@@ -1,3 +1,6 @@
+# Optional trusted SSH user CA public keys; disabled when empty.
+# trusted_user_ca_keys = "/etc/sshgatew/cloudflare-ca.pub"
+
 listen_address = "0.0.0.0:2222"
 database_path = "/var/lib/sshgatew/sshgatew.db"
 master_key_path = "/var/lib/sshgatew/master.key"

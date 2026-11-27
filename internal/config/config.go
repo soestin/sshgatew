@@ -42,17 +42,19 @@ type OIDCConfig struct {
 }
 
 type Config struct {
-	ListenAddress      string     `toml:"listen_address"`
-	DatabasePath       string     `toml:"database_path"`
-	MasterKeyPath      string     `toml:"master_key_path"`
-	HostKeyPath        string     `toml:"host_key_path"`
-	IdleTimeout        Duration   `toml:"idle_timeout"`
-	DownstreamTimeout  Duration   `toml:"downstream_dial_timeout"`
-	MaxSessions        int        `toml:"max_sessions"`
-	MaxSessionsPerUser int        `toml:"max_sessions_per_user"`
-	LogLevel           string     `toml:"log_level"`
-	LogFormat          string     `toml:"log_format"`
-	OIDC               OIDCConfig `toml:"oidc"`
+	CertificateUsernameAliases map[string]string `toml:"certificate_username_aliases"`
+	TrustedUserCAKeys          string            `toml:"trusted_user_ca_keys"`
+	ListenAddress              string            `toml:"listen_address"`
+	DatabasePath               string            `toml:"database_path"`
+	MasterKeyPath              string            `toml:"master_key_path"`
+	HostKeyPath                string            `toml:"host_key_path"`
+	IdleTimeout                Duration          `toml:"idle_timeout"`
+	DownstreamTimeout          Duration          `toml:"downstream_dial_timeout"`
+	MaxSessions                int               `toml:"max_sessions"`
+	MaxSessionsPerUser         int               `toml:"max_sessions_per_user"`
+	LogLevel                   string            `toml:"log_level"`
+	LogFormat                  string            `toml:"log_format"`
+	OIDC                       OIDCConfig        `toml:"oidc"`
 }
 
 func Default() Config {
@@ -84,6 +86,9 @@ func Load(path string) (Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return Config{}, fmt.Errorf("decode config: %w", err)
 	}
+	if value := os.Getenv("SSHGATEW_TRUSTED_USER_CA_KEYS"); value != "" {
+		c.TrustedUserCAKeys = value
+	}
 	if err := applyOIDCEnvironment(&c); err != nil {
 		return Config{}, err
 	}
@@ -94,6 +99,24 @@ func Load(path string) (Config, error) {
 }
 
 func (c Config) Validate() error {
+	for alias, user := range c.CertificateUsernameAliases {
+		if alias != strings.ToLower(alias) || user != strings.ToLower(user) || strings.ContainsAny(alias+user, "+") || alias == user || alias == "" || user == "" {
+			return errors.New("certificate username aliases must map distinct lowercase base usernames")
+		}
+		// Aliases may exceed the database username length limit (email prefixes),
+		// but both names must use the same safe alphabet.
+		for _, name := range []string{alias, user} {
+			if len(name) > 128 {
+				return errors.New("certificate username alias is too long")
+			}
+			for _, char := range name {
+				if !(char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '-' || char == '_' || char == '.') {
+					return errors.New("invalid certificate username alias")
+				}
+			}
+		}
+	}
+
 	if _, _, err := net.SplitHostPort(c.ListenAddress); err != nil {
 		return fmt.Errorf("invalid listen_address: %w", err)
 	}

@@ -22,16 +22,17 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	store     *store.Store
-	cipher    *secrets.Cipher
-	connector downstream.Connector
-	ssh       *charmssh.Server
-	log       *slog.Logger
-	oidc      oidcAuthenticator
-	mu        sync.Mutex
-	total     int
-	perUser   map[int64]int
+	cfg                config.Config
+	store              *store.Store
+	cipher             *secrets.Cipher
+	connector          downstream.Connector
+	ssh                *charmssh.Server
+	log                *slog.Logger
+	certificateChecker *gossh.CertChecker
+	oidc               oidcAuthenticator
+	mu                 sync.Mutex
+	total              int
+	perUser            map[int64]int
 }
 
 type oidcAuthenticator interface {
@@ -59,6 +60,10 @@ func New(cfg config.Config, st *store.Store, cipher *secrets.Cipher, log *slog.L
 		return nil, fmt.Errorf("parse gateway host key: %w", err)
 	}
 	s := &Server{cfg: cfg, store: st, cipher: cipher, connector: downstream.Connector{Timeout: cfg.DownstreamTimeout.Value()}, log: log, perUser: map[int64]int{}}
+	s.certificateChecker, err = loadUserCAs(cfg.TrustedUserCAKeys)
+	if err != nil {
+		return nil, err
+	}
 	if cfg.OIDC.Enabled {
 		s.oidc = oidcdevice.New(oidcdevice.Options{IssuerURL: cfg.OIDC.IssuerURL, ClientID: cfg.OIDC.ClientID, ClientSecret: cfg.OIDC.ClientSecret, UsernameClaim: cfg.OIDC.UsernameClaim, Scopes: cfg.OIDC.Scopes})
 	}
