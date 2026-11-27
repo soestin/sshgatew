@@ -30,6 +30,9 @@ func (s *Server) stateFromContext(ctx charmssh.Context) (authState, bool) {
 	if err != nil {
 		return authState{}, false
 	}
+	if ctx.Permissions().Extensions["sshgatew-auth-method"] == "certificate" {
+		username = ctx.Permissions().Extensions["sshgatew-user"]
+	}
 	u, err := s.store.UserByName(context.Background(), username)
 	if err != nil || !u.Enabled {
 		return authState{}, false
@@ -56,6 +59,9 @@ func (s *Server) serverConfig(ctx charmssh.Context) *gossh.ServerConfig {
 		username, target, err := splitRoutedUsername(meta.User())
 		if err != nil {
 			return nil, err
+		}
+		if cert, ok := key.(*gossh.Certificate); ok {
+			return s.authenticateCertificate(meta, cert, username, target)
 		}
 		fp := gossh.FingerprintSHA256(key)
 		u, err := s.store.AuthenticateKey(context.Background(), username, fp)

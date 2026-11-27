@@ -5,7 +5,7 @@ changes so authentication and compatibility implications can be discussed.
 
 ## Development
 
-SSHGateW requires Go 1.26.10 or newer.
+SSHGateW requires Go 1.26.11 or newer.
 
 ```sh
 go test ./...
