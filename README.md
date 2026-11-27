@@ -272,12 +272,6 @@ or `SSHGATEW_TRUSTED_USER_CA_KEYS`, to a file of OpenSSH CA public keys (one
 per line). The file must be regular and not writable by group or others. Missing,
 empty, or malformed configured files prevent startup. Restart after changing trust.
 
-For Cloudflare Access for Infrastructure, use the account's **Gateway SSH CA**,
-not the legacy per-application short-lived certificate CA. Configure a Cloudflare
-Tunnel route, target, and Infrastructure application for the gateway's SSH port.
-Restrict its policy to the intended identity and explicit SSHGateW usernames.
-Clients connect with Cloudflare One Client in Traffic and DNS mode.
-
 Certificates must be user certificates with a valid signature, current validity,
 and a nonempty principal list containing the exact SSH login name. For routed
 logins, `alice+production` must itself be an allowed principal. The corresponding
@@ -288,12 +282,9 @@ creates users or grants access to downstream hosts. Unsupported critical options
 Existing registered keys and OIDC login remain available. Audit events use
 `gateway.auth.certificate` with CA fingerprint, serial, key ID, and target.
 
-This deployment adds certificate support locally to v0.11.1. Keep the source
-patch when updating the image until equivalent support is available upstream.
-
-For Cloudflare's browser-rendered terminal, create a separate SSH application,
+For Cloudflare's browser-rendered terminal, create an SSH Access application,
 its per-application CA, and a public tunnel hostname. Add that CA public key to
-the trusted CA file alongside the Gateway CA. Browser certificate usernames
+the trusted CA file. Browser certificate usernames
 follow the identity's email prefix. A top-level, explicit alias can map that
 certificate login to an existing gateway account:
 
@@ -305,3 +296,11 @@ The certificate must still be trusted and contain the exact requested alias as
 principal. Aliases apply only after certificate validation, never to raw-key or
 OIDC logins. They use the canonical account's existing role, grants, TOTP, and
 session limits; session context and audit retain the authenticated mapping.
+
+For a single-hostname browser terminal, turn off the Access application's eager
+cookie redirects if successful identity-provider logins repeatedly redirect back
+to sign-in. Keep the identity policy and cookie security controls enforced.
+
+Optional Cloudflare One Client/WARP integration is documented separately in
+[the WARP setup guide](docs/cloudflare-warp.md). It is not required for the
+browser-rendered terminal.
