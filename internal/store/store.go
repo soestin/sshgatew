@@ -157,9 +157,43 @@ INSERT OR IGNORE INTO schema_migrations(version) VALUES(1);`
 		return err
 	}
 	if migrated == 0 {
-		return s.migrateOIDCIdentitiesV7()
+		if err := s.migrateOIDCIdentitiesV7(); err != nil {
+			return err
+		}
+	}
+	if err := s.db.QueryRow("SELECT count(*) FROM schema_migrations WHERE version=8").Scan(&migrated); err != nil {
+		return err
+	}
+	if migrated == 0 {
+		return s.migrateCertificateMappingsV8()
 	}
 	return nil
+}
+
+func (s *Store) migrateCertificateMappingsV8() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`CREATE TABLE IF NOT EXISTS certificate_username_mappings(
+ user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+ certificate_username TEXT NOT NULL UNIQUE COLLATE BINARY);
+CREATE TABLE IF NOT EXISTS certificate_mapping_imports(id INTEGER PRIMARY KEY CHECK(id=1));
+CREATE TRIGGER IF NOT EXISTS certificate_mapping_no_user_insert BEFORE INSERT ON certificate_username_mappings
+ WHEN EXISTS(SELECT 1 FROM users WHERE username=NEW.certificate_username)
+ BEGIN SELECT RAISE(ABORT,'certificate username belongs to an existing account'); END;
+CREATE TRIGGER IF NOT EXISTS certificate_mapping_no_user_update BEFORE UPDATE ON certificate_username_mappings
+ WHEN EXISTS(SELECT 1 FROM users WHERE username=NEW.certificate_username)
+ BEGIN SELECT RAISE(ABORT,'certificate username belongs to an existing account'); END;
+CREATE TRIGGER IF NOT EXISTS user_no_certificate_alias BEFORE INSERT ON users
+ WHEN EXISTS(SELECT 1 FROM certificate_username_mappings WHERE certificate_username=NEW.username)
+ BEGIN SELECT RAISE(ABORT,'username is already used by a certificate mapping'); END;
+INSERT OR IGNORE INTO schema_migrations(version) VALUES(8);`)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) migrateOIDCIdentitiesV7() error {

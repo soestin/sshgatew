@@ -664,6 +664,17 @@ func (m *Model) openSelectedActions() tea.Cmd {
 			totpAction = actionItem{"Remove TOTP", "user_totp_remove"}
 		}
 		m.actions = []actionItem{{"Manage SSH keys", "user_keys"}, totpAction, {role, "user_role"}, {state, "user_toggle"}, {"Delete", "user_delete"}}
+		alias, err := m.store.CertificateUsernameForUser(m.ctx, u.ID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			m.closeModal("Unable to load certificate mapping: " + err.Error())
+			return nil
+		}
+		certificateLabel := "Map certificate username"
+		if alias != "" {
+			certificateLabel = "Change certificate mapping (" + alias + ")"
+			m.actions = append(m.actions, actionItem{"Remove certificate mapping", "user_certificate_remove"})
+		}
+		m.actions = append(m.actions, actionItem{certificateLabel, "user_certificate_map"})
 		if m.oidcIssuer != "" {
 			label := "Map OIDC username"
 			if _, ok := m.oidcIdentityForUser(u.ID); ok {
@@ -745,6 +756,10 @@ func (m *Model) handleActionKey(key string) tea.Cmd {
 }
 
 func (m *Model) dispatchAction(code string) tea.Cmd {
+	if strings.HasPrefix(code, "user_certificate_") && m.user.Role != store.RoleAdmin {
+		m.closeModal("Administrator access required.")
+		return nil
+	}
 	p := m.pending
 	switch code {
 	case "target_connect":
@@ -773,7 +788,7 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 	case "target_toggle":
 		enabled := !p.target.Enabled
 		return m.mutate("targets", "Target updated.", "admin.target."+enabledWord(enabled), map[string]any{"target": p.target.Name}, func() error { return m.store.SetTargetEnabled(m.ctx, p.target.Name, enabled) })
-	case "target_delete", "user_delete", "group_delete", "grant_delete", "forward_delete", "identity_delete", "user_totp_remove", "user_oidc_remove":
+	case "target_delete", "user_delete", "group_delete", "grant_delete", "forward_delete", "identity_delete", "user_totp_remove", "user_oidc_remove", "user_certificate_remove":
 		p.kind = code
 		m.mode = "confirm_delete"
 	case "identity_view":
@@ -812,6 +827,14 @@ func (m *Model) dispatchAction(code string) tea.Cmd {
 		p.kind, p.totpSecret, p.totpURI, p.totpQR = "user_totp_setup", secret, uri, qr
 		m.mode = "totp_enroll"
 		m.status = "Scan the QR code, then press Enter."
+	case "user_certificate_map":
+		value, err := m.store.CertificateUsernameForUser(m.ctx, p.user.ID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			m.closeModal("Unable to load certificate mapping: " + err.Error())
+			return nil
+		}
+		m.form = &adminForm{kind: "user_certificate_map", title: "Map certificate account for " + p.username, fields: []formField{{label: "Certificate username", value: value}}}
+		m.mode = "form"
 	case "user_oidc_map":
 		value := ""
 		if identity, ok := m.oidcIdentityForUser(p.user.ID); ok {
@@ -1000,6 +1023,13 @@ func (m *Model) submitForm() tea.Cmd {
 		return nil
 	case "user_add":
 		return m.mutate("users", "User added.", "admin.user.add", map[string]any{"username": values[0], "role": values[1]}, func() error { _, err := m.store.AddUser(m.ctx, values[0], values[1]); return err })
+	case "user_certificate_map":
+		if m.user.Role != store.RoleAdmin {
+			m.closeModal("Administrator access required.")
+			return nil
+		}
+		p := m.pending
+		return m.mutate("users", "Certificate username mapped.", "admin.user.certificate.map", map[string]any{"username": p.username, "certificate_username": values[0]}, func() error { return m.store.SetCertificateUsernameMapping(m.ctx, p.user.ID, values[0]) })
 	case "user_oidc_map":
 		p := m.pending
 		return m.mutate("users", "OIDC username mapped; it will bind permanently on first login.", "admin.user.oidc.map", map[string]any{"username": p.username, "provider_username": strings.ToLower(values[0]), "issuer": m.oidcIssuer}, func() error {
@@ -1128,6 +1158,12 @@ func (m *Model) finishDelete() tea.Cmd {
 		return m.mutate("forwards", "TCP destination removed.", "admin.forward.remove", map[string]any{"target": r.Target, "host": r.Host, "port": r.Port}, func() error { return m.store.DeleteForwardRule(m.ctx, r.ID) })
 	case "user_totp_remove":
 		return m.mutate("users", "TOTP removed.", "admin.user.totp.remove", map[string]any{"username": p.username}, func() error { return m.store.RemoveUserTOTP(m.ctx, p.user.ID) })
+	case "user_certificate_remove":
+		if m.user.Role != store.RoleAdmin {
+			m.closeModal("Administrator access required.")
+			return nil
+		}
+		return m.mutate("users", "Certificate mapping removed.", "admin.user.certificate.remove", map[string]any{"username": p.username}, func() error { return m.store.RemoveCertificateUsernameMapping(m.ctx, p.user.ID) })
 	case "user_oidc_remove":
 		return m.mutate("users", "OIDC mapping removed.", "admin.user.oidc.remove", map[string]any{"username": p.username, "issuer": m.oidcIssuer}, func() error { return m.store.RemoveOIDCIdentity(m.ctx, p.user.ID, m.oidcIssuer) })
 	case "identity_delete":
@@ -1992,6 +2028,8 @@ func (m *Model) modalContent(inner int) (string, string, []string) {
 				name = "SSH key " + m.pending.identity.Name
 			case "user_totp_remove":
 				name = "TOTP for user " + m.pending.username
+			case "user_certificate_remove":
+				name = "certificate mapping for user " + m.pending.username
 			case "user_oidc_remove":
 				name = "OIDC mapping for user " + m.pending.username
 			}

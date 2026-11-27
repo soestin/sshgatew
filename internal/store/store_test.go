@@ -59,7 +59,7 @@ INSERT INTO targets(name,host,port,remote_username,credential_kind,host_key_algo
 		t.Fatalf("forwarded-agent target rejected after migration: %v", err)
 	}
 	var version int
-	if err = store.DB().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 7 {
+	if err = store.DB().QueryRow("SELECT max(version) FROM schema_migrations").Scan(&version); err != nil || version != 8 {
 		t.Fatalf("migration version=%d err=%v", version, err)
 	}
 }

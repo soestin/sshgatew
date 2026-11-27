@@ -63,10 +63,10 @@ func (s *Server) authenticateCertificate(meta gossh.ConnMetadata, cert *gossh.Ce
 	if s.certificateChecker != nil && len(cert.ValidPrincipals) > 0 {
 		permissions, err = s.certificateChecker.Authenticate(meta, cert)
 		if err == nil {
-			if canonical, ok := s.cfg.CertificateUsernameAliases[username]; ok {
-				username = canonical
+			u, err = s.store.UserForCertificateUsername(context.Background(), username)
+			if err == nil {
+				username = u.Username
 			}
-			u, err = s.store.UserByName(context.Background(), username)
 			if err == nil && !u.Enabled {
 				err = errors.New("disabled user")
 			}

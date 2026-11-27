@@ -285,12 +285,15 @@ Existing registered keys and OIDC login remain available. Audit events use
 For Cloudflare's browser-rendered terminal, create an SSH Access application,
 its per-application CA, and a public tunnel hostname. Add that CA public key to
 the trusted CA file. Browser certificate usernames
-follow the identity's email prefix. A top-level, explicit alias can map that
-certificate login to an existing gateway account:
+follow the identity's email prefix. As an administrator, open **Users**, select
+an existing account, and choose **Map certificate username**. For example, map
+`alice.smith` to the gateway account `alice`. The same menu lets you change
+or remove the mapping immediately, without restarting the gateway. Mappings are
+stored in the database and changes are audited. Only administrators can edit them.
 
-```toml
-certificate_username_aliases = { web-alice = "alice" }
-```
+Existing `certificate_username_aliases` TOML mappings are imported once on first
+startup after upgrading. You can then remove that setting from the configuration;
+leaving it in place will not overwrite later in-app edits or restore removed mappings.
 
 The certificate must still be trusted and contain the exact requested alias as
 principal. Aliases apply only after certificate validation, never to raw-key or

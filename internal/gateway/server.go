@@ -64,6 +64,9 @@ func New(cfg config.Config, st *store.Store, cipher *secrets.Cipher, log *slog.L
 	if err != nil {
 		return nil, err
 	}
+	if err := st.ImportCertificateUsernameMappings(context.Background(), cfg.CertificateUsernameAliases); err != nil {
+		return nil, fmt.Errorf("import certificate username mappings: %w", err)
+	}
 	if cfg.OIDC.Enabled {
 		s.oidc = oidcdevice.New(oidcdevice.Options{IssuerURL: cfg.OIDC.IssuerURL, ClientID: cfg.OIDC.ClientID, ClientSecret: cfg.OIDC.ClientSecret, UsernameClaim: cfg.OIDC.UsernameClaim, Scopes: cfg.OIDC.Scopes})
 	}

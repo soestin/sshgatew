@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"database/sql"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -633,5 +635,41 @@ func TestUserKeyManagerEmptyAndScrolling(t *testing.T) {
 	m.handleActionKey("home")
 	if view := ansi.Strip(m.View().Content); !strings.Contains(view, "Add another SSH key") {
 		t.Fatalf("cannot scroll back to add key:\n%s", view)
+	}
+}
+
+func TestAdminCertificateUsernameMapping(t *testing.T) {
+	m, st := testModel(t)
+	alice, err := st.AddUser(context.Background(), "alice", store.RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyMessage(m, reloadMsg{})
+	m.section = "users"
+	for i, u := range m.users {
+		if u.ID == alice.ID {
+			m.cursor = i
+		}
+	}
+	m.openSelectedActions()
+	m.dispatchAction("user_certificate_map")
+	typeKeys(m, "web-alice")
+	applyCommand(m, m.handleKey("enter"))
+	if alias, err := st.CertificateUsernameForUser(context.Background(), alice.ID); err != nil || alias != "web-alice" {
+		t.Fatalf("alias=%q err=%v", alias, err)
+	}
+	for i, u := range m.users {
+		if u.ID == alice.ID {
+			m.cursor = i
+		}
+	}
+	m.openSelectedActions()
+	m.dispatchAction("user_certificate_remove")
+	if m.mode != "confirm_delete" {
+		t.Fatal("removal did not ask for confirmation")
+	}
+	applyCommand(m, m.handleKey("y"))
+	if _, err := st.CertificateUsernameForUser(context.Background(), alice.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("mapping retained: %v", err)
 	}
 }

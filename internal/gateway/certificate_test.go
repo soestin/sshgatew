@@ -89,6 +89,7 @@ func TestCertificateAuthenticationHandshake(t *testing.T) {
 		change     func(*gossh.Certificate)
 		authority  gossh.Signer
 		allow      bool
+		before     func()
 	}{
 		{name: "trusted", user: "alice", allow: true},
 		{name: "browser alias", user: "web-alice", change: func(c *gossh.Certificate) { c.ValidPrincipals = []string{"web-alice"} }, allow: true},
@@ -109,9 +110,31 @@ func TestCertificateAuthenticationHandshake(t *testing.T) {
 		{name: "force command rejected", user: "alice", change: func(c *gossh.Certificate) { c.CriticalOptions = map[string]string{"force-command": "sh"} }},
 		{name: "source address allowed", user: "alice", change: func(c *gossh.Certificate) { c.CriticalOptions = map[string]string{"source-address": "127.0.0.1/32"} }, allow: true},
 		{name: "source address denied", user: "alice", change: func(c *gossh.Certificate) { c.CriticalOptions = map[string]string{"source-address": "192.0.2.1/32"} }},
+		{name: "mapping changed without restart", user: "updated-alice", change: func(c *gossh.Certificate) { c.ValidPrincipals = []string{"updated-alice"} }, allow: true, before: func() {
+			u, err := st.UserByName(context.Background(), "alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = st.SetCertificateUsernameMapping(context.Background(), u.ID, "updated-alice"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "previous alias revoked", user: "web-alice", change: func(c *gossh.Certificate) { c.ValidPrincipals = []string{"web-alice"} }},
+		{name: "mapping removed without restart", user: "updated-alice", change: func(c *gossh.Certificate) { c.ValidPrincipals = []string{"updated-alice"} }, before: func() {
+			u, err := st.UserByName(context.Background(), "alice")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = st.RemoveCertificateUsernameMapping(context.Background(), u.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.before != nil {
+				tt.before()
+			}
 			cert := &gossh.Certificate{Key: key.PublicKey(), CertType: gossh.UserCert, ValidPrincipals: []string{"alice"}, ValidAfter: uint64(time.Now().Add(-time.Hour).Unix()), ValidBefore: uint64(time.Now().Add(time.Hour).Unix())}
 			if tt.change != nil {
 				tt.change(cert)
